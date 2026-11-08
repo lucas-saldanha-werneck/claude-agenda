@@ -89,6 +89,7 @@ def main():
         return 0
     dry = "--dry-run" in argv
     prefixes = [argv[i + 1] for i, a in enumerate(argv) if a == "--prefix" and i + 1 < len(argv)]
+    shared.seed()   # first run: create the config files that are missing (never changes existing ones)
     cfg = shared.load_config("launchd-overdue")
     if not prefixes and os.environ.get("LAUNCHD_OVERDUE_PREFIX"):
         prefixes = [p for p in os.environ["LAUNCHD_OVERDUE_PREFIX"].split(",") if p]
@@ -103,8 +104,7 @@ def main():
     la = os.path.join(home(), "Library", "LaunchAgents")
     dest = os.path.expanduser(os.environ.get("LAUNCHD_OVERDUE_MOVE_TO") or cfg.get("overdue_dir")
                               or os.path.join(la, "overdue"))
-    yearly_file = os.path.expanduser(os.environ.get("LAUNCHD_OVERDUE_YEARLY_FILE") or cfg.get("yearly_file")
-                                     or os.path.join(home(), ".config", "launchd-overdue", "yearly.txt"))
+    yearly_file = shared.yearly_path(cfg)
     yearly = set()
     if os.path.exists(yearly_file):
         with open(yearly_file, encoding="utf-8") as f:

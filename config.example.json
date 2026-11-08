@@ -1,0 +1,42 @@
+{
+  "//": "claude-agenda settings. Every option below is at its default; null means the built-in default. An environment variable wins over the same option here. Details: README, 'Settings'.",
+
+  "//label_prefix": "launchd label prefix for add/list/remove; always ends with '.'",
+  "label_prefix": "com.claude-agenda.",
+
+  "//claude": "Claude Code binary. null: ~/.local/libexec/claude-stable/claude if present, else claude on PATH",
+  "claude": null,
+
+  "//tmux": "tmux binary. null: tmux on PATH, else /opt/homebrew/bin/tmux or /usr/local/bin/tmux",
+  "tmux": null,
+
+  "//log_dir": "folder for claude-agenda.log. null: ~/Library/Logs (macOS), else ~/.local/state/claude-agenda",
+  "log_dir": null,
+
+  "//stale_hours": "close a previous session whose status is unknown after this many hours",
+  "stale_hours": 12,
+
+  "//default_dir": "folder for run when the job gives no --dir. null: the current folder (launchd starts jobs in /)",
+  "default_dir": null,
+
+  "//dir_aliases": "other flag names run accepts for --dir, such as [\"--folder\"]; each starts with '-'",
+  "dir_aliases": [],
+
+  "//launch_command": "your own launcher, as a list with {prefix} {name} {prompt} {dir} {dir_abs} {remote_control}. null: built-in tmux launch",
+  "launch_command": null,
+
+  "//idle_outside_tmux": "previous session idle but not in tmux: skip, open or close",
+  "idle_outside_tmux": "skip",
+
+  "//close_command": "with idle_outside_tmux close: a list with {pid} {name} {prefix} that closes it. null: SIGTERM to its process",
+  "close_command": null,
+
+  "//overdue_prefixes": "label prefixes launchd-overdue checks, a list; each ends with '.'. null: [label_prefix]",
+  "overdue_prefixes": null,
+
+  "//yearly_file": "labels of dated jobs that repeat every year, one per line. null: ~/.config/launchd-overdue/yearly.txt",
+  "yearly_file": null,
+
+  "//overdue_dir": "where launchd-overdue moves the plists it turns off. null: ~/Library/LaunchAgents/overdue",
+  "overdue_dir": null
+}

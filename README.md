@@ -64,6 +64,16 @@ The plugin is called `launchd-agenda` because Claude Code reserves plugin names 
 
 Requires `python3` 3.8+, `tmux` and Claude Code (`claude`).
 
+## Your settings
+
+Your settings are in `~/.config/claude-agenda/config.json` (or `$CLAUDE_AGENDA_CONFIG`; `$XDG_CONFIG_HOME` is
+respected). You do not have to create it: the first time the plugin starts a session, or `claude-agenda` or
+`launchd-overdue` runs, it is created with every option at its default (the same behavior as no file), next to
+`close-self-allow` and `~/.config/launchd-overdue/yearly.txt` (comments only). A file that already exists is
+never changed, and plugin updates or a new `install.sh` never touch these files. Starters:
+[`config.example.json`](config.example.json), [`close-self-allow.example`](close-self-allow.example),
+[`yearly.example.txt`](yearly.example.txt).
+
 ## Settings
 
 Settings live in `~/.config/claude-agenda/config.json` (or `$CLAUDE_AGENDA_CONFIG`). **They survive plugin

@@ -17,6 +17,7 @@ OS="${INSTALL_OS:-$(uname -s)}"   # INSTALL_OS: test hook
 DRY=0; LOAD=0; UNINSTALL=0; JOB=1
 TOOLS="claude-agenda claude-close-self launchd-overdue"
 LIBS="claude_agenda_config.py"   # shared module the Python tools import from their own folder
+STARTERS="config.example.json close-self-allow.example yearly.example.txt"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +43,9 @@ if [ $UNINSTALL = 1 ]; then
   for t in $TOOLS $LIBS; do
     [ -e "$BIN/$t" ] && run rm -f "$BIN/$t" && echo "removed $BIN/$t"
   done
+  for t in $STARTERS; do
+    [ -e "$BIN/claude-agenda.$t" ] && run rm -f "$BIN/claude-agenda.$t" && echo "removed $BIN/claude-agenda.$t"
+  done
   if [ -f "$PLIST" ]; then
     have_launchctl && run launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
     run rm -f "$PLIST" && echo "removed $PLIST"
@@ -65,6 +69,9 @@ for t in $TOOLS; do
 done
 for t in $LIBS; do
   run cp "$R/bin/$t" "$BIN/$t" && run chmod 644 "$BIN/$t" && echo "installed $BIN/$t"
+done
+for t in $STARTERS; do   # starter config files: the tools copy them to ~/.config on first run
+  run cp "$R/$t" "$BIN/claude-agenda.$t" && run chmod 644 "$BIN/claude-agenda.$t" && echo "installed $BIN/claude-agenda.$t"
 done
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: $BIN is not on your PATH" ;; esac
 

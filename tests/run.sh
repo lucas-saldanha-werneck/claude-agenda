@@ -61,6 +61,11 @@ P2="$H2/Library/LaunchAgents/com.claude-agenda.launchd-overdue.plist"
 [ -f "$P2" ] && "$PY" -c "import plistlib,sys;a=plistlib.load(open(sys.argv[1],'rb'))['ProgramArguments'];assert '--prefix' not in a,a" "$P2" \
   && ok "no --prefix given: the overdue job follows the config file" || bad "plist: $(cat "$P2" 2>&1)"
 [ -f "$H2/.local/bin/claude_agenda_config.py" ] && ok "shared module installed next to the tools" || bad "$OUT"
+[ -f "$H2/.local/bin/claude-agenda.config.example.json" ] && ok "starter config installed next to the tools" || bad "$OUT"
+H3="$W/home3"; mkdir -p "$H3"
+OUT=$(cd / && HOME="$H3" "$PY" "$H2/.local/bin/claude-agenda" list 2>&1)
+cmp -s "$H3/.config/claude-agenda/config.json" "$R/config.example.json" && [ -f "$H3/.config/claude-agenda/close-self-allow" ] \
+  && ok "installed claude-agenda seeds ~/.config/claude-agenda on first run" || bad "not seeded: $OUT"
 mkdir -p "$H2/.config/claude-agenda"; echo '{"overdue_prefixes": ["org.cfg."]}' > "$H2/.config/claude-agenda/config.json"
 OUT=$(cd / && HOME="$H2" "$PY" "$H2/.local/bin/launchd-overdue" --dry-run 2>&1)
 echo "$OUT" | grep -q "org.cfg." && ok "installed launchd-overdue runs and reads the config" || bad "$OUT"
@@ -71,7 +76,7 @@ grep -q "^bootstrap gui/" "$W/launchctl-calls" 2>/dev/null && ok "--load calls (
 OUT=$(HOME="$H" INSTALL_OS=Linux bash "$R/install.sh" --prefix org.other)
 echo "$OUT" | grep -q "macOS-only" && [ ! -f "$H/Library/LaunchAgents/org.other.launchd-overdue.plist" ] && ok "non-macOS: no plist" || bad "$OUT"
 OUT=$(HOME="$H" INSTALL_OS=Darwin bash "$R/install.sh" --uninstall --prefix org.example.agenda)
-[ ! -e "$H/.local/bin/claude-agenda" ] && [ ! -f "$P" ] && grep -q "^bootout gui/.*/org.example.agenda.launchd-overdue" "$W/launchctl-calls" && ok "--uninstall reverses it" || bad "$OUT"
+[ ! -e "$H/.local/bin/claude-agenda" ] && [ ! -e "$H/.local/bin/claude-agenda.config.example.json" ] && [ ! -f "$P" ] && grep -q "^bootout gui/.*/org.example.agenda.launchd-overdue" "$W/launchctl-calls" && ok "--uninstall reverses it" || bad "$OUT"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

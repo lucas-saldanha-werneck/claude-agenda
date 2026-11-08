@@ -507,5 +507,185 @@ class Overdue(Base):
         self.assertIn("org.other.past.plist", self.left())
 
 
+STARTERS = {"config.json": "config.example.json", "close-self-allow": "close-self-allow.example"}
+SEED = os.path.join(ROOT, "bin", "claude_agenda_config.py")
+
+
+def read_bytes(p):
+    with open(p, "rb") as f:
+        return f.read()
+
+
+def strip_times(text):
+    """Log lines start with a timestamp; drop it so two runs can be compared."""
+    return "\n".join(l[20:] if l[:4].isdigit() else l for l in text.splitlines())
+
+
+class Seed(Base):
+    """The tools create their config files on first run, from the starters in the repo, and never touch a file
+    that already exists."""
+
+    def cfgdir(self):
+        return os.path.join(self.home, ".config", "claude-agenda")
+
+    def yearly(self):
+        return os.path.join(self.home, ".config", "launchd-overdue", "yearly.txt")
+
+    def assert_seeded(self, folder):
+        for name, starter in STARTERS.items():
+            self.assertEqual(read_bytes(os.path.join(folder, name)), read_bytes(os.path.join(ROOT, starter)), name)
+
+    def test_missing_files_are_created_with_the_defaults(self):
+        r = self.agenda("list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assert_seeded(self.cfgdir())
+        self.assertEqual(read_bytes(self.yearly()), read_bytes(os.path.join(ROOT, "yearly.example.txt")))
+        self.assertEqual(r.stderr, "")
+
+    def test_hook_script_seeds_and_exits_0(self):
+        r = subprocess.run([PY, SEED, "--seed"], capture_output=True, text=True, env=self.env)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assert_seeded(self.cfgdir())
+        self.assertTrue(os.path.isfile(self.yearly()))
+
+    def test_launchd_overdue_seeds_too(self):
+        r = subprocess.run([PY, OVERDUE, "--dry-run"], capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assert_seeded(self.cfgdir())
+
+    def test_existing_files_are_never_changed(self):
+        os.makedirs(self.cfgdir())
+        os.makedirs(os.path.dirname(self.yearly()))
+        mine = {os.path.join(self.cfgdir(), "config.json"): b'{"stale_hours": 3}\r\n',
+                os.path.join(self.cfgdir(), "close-self-allow"): b"^mine-\n",
+                self.yearly(): b""}
+        for p, data in mine.items():
+            with open(p, "wb") as f:
+                f.write(data)
+            os.utime(p, (1000000000, 1000000000))
+        for _ in range(2):
+            self.agenda("list")
+            subprocess.run([PY, SEED, "--seed"], env=self.env)
+        for p, data in mine.items():
+            self.assertEqual(read_bytes(p), data, p)
+            self.assertEqual(os.stat(p).st_mtime, 1000000000, p)
+
+    def test_env_overrides_are_respected(self):
+        alt = os.path.join(self.t, "alt", "my.json")
+        xdg = os.path.join(self.t, "xdg")
+        allow = os.path.join(self.t, "allow", "list")
+        yearly = os.path.join(self.t, "y", "yearly")
+        r = self.agenda("list", CLAUDE_AGENDA_CONFIG=alt, XDG_CONFIG_HOME=xdg, CLAUDE_CLOSE_SELF_ALLOW_FILE=allow,
+                        LAUNCHD_OVERDUE_YEARLY_FILE=yearly)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(read_bytes(alt), read_bytes(os.path.join(ROOT, "config.example.json")))
+        self.assertEqual(read_bytes(allow), read_bytes(os.path.join(ROOT, "close-self-allow.example")))
+        self.assertTrue(os.path.isfile(yearly))
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config")))
+        self.assertFalse(os.path.exists(os.path.join(xdg, "claude-agenda", "config.json")))
+        r = self.agenda("list", XDG_CONFIG_HOME=xdg)
+        self.assert_seeded(os.path.join(xdg, "claude-agenda"))
+
+    def test_yearly_file_from_the_config_is_where_it_is_seeded(self):
+        os.makedirs(self.cfgdir())
+        y = os.path.join(self.t, "mine", "yearly.txt")
+        with open(os.path.join(self.cfgdir(), "config.json"), "w") as f:
+            json.dump({"yearly_file": y}, f)
+        self.agenda("list")
+        self.assertTrue(os.path.isfile(y))
+        self.assertFalse(os.path.exists(self.yearly()))
+
+    def test_unwritable_place_does_not_crash(self):
+        with open(os.path.join(self.home, ".config"), "w") as f:   # a file where the folder should be
+            f.write("x")
+        r = self.agenda("list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        r = subprocess.run([PY, SEED, "--seed"], capture_output=True, text=True, env=self.env)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "read-only folders are not enforced for Windows or root")
+    def test_read_only_folder_does_not_crash(self):
+        cfg = os.path.join(self.home, ".config")
+        os.makedirs(cfg)
+        os.chmod(cfg, 0o500)
+        try:
+            r = self.agenda("list")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            r = subprocess.run([PY, SEED, "--seed"], capture_output=True, text=True, env=self.env)
+            self.assertEqual((r.returncode, r.stderr), (0, ""))
+            self.assertEqual(os.listdir(cfg), [])
+        finally:
+            os.chmod(cfg, 0o700)
+
+    def test_unreadable_existing_config_is_left_alone(self):
+        os.makedirs(self.cfgdir())
+        p = os.path.join(self.cfgdir(), "config.json")
+        with open(p, "w") as f:
+            f.write("{}")
+        if os.name != "nt":
+            os.chmod(p, 0)
+        try:
+            subprocess.run([PY, SEED, "--seed"], capture_output=True, env=self.env)
+        finally:
+            os.chmod(p, 0o600)
+        self.assertEqual(read_bytes(p), b"{}")
+
+    def test_seeded_config_behaves_like_no_config(self):
+        """Same results with the seeded file as with no file at all: every setting, then whole runs."""
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+        ld = SourceFileLoader("claude_agenda_cli", AGENDA)
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(ld.name, ld))
+        ld.exec_module(mod)
+        with open(os.path.join(ROOT, "config.example.json"), encoding="utf-8") as f:
+            starter = json.load(f)
+        env = {k: v for k, v in self.env.items() if not k.startswith("CLAUDE_AGENDA_")}
+
+        def resolve(cfg):
+            with mock.patch.dict(os.environ, env, clear=True):
+                mod._CONFIG = cfg
+                return {
+                    "label_prefix": mod.label_prefix(), "claude": mod.claude_cmd(), "tmux": mod.tmux_cmd(),
+                    "log_dir": mod.log_dir(), "stale_hours": float(mod.setting("stale_hours", default=12)),
+                    "default_dir": mod.setting("default_dir", default=None), "launch": mod.launch_command(),
+                    "dir_aliases": mod.shared.string_list(mod.config(), "dir_aliases", "t"),
+                    "idle": mod.config().get("idle_outside_tmux", "skip"), "close": mod.config().get("close_command"),
+                    "yearly": mod.shared.yearly_path(mod.config()),
+                    "overdue_prefixes": list(mod.config().get("overdue_prefixes") or
+                                             [mod.shared.normalize_prefix(mod.config().get("label_prefix"))]),
+                    "overdue_dir": mod.config().get("overdue_dir") or "default",
+                }
+        self.assertEqual(resolve({}), resolve(starter))
+
+        # whole runs: with no file (the config path cannot be created, so seeding is skipped) and seeded
+        blocker = os.path.join(self.t, "blocker")
+        with open(blocker, "w") as f:
+            f.write("x")
+        os.makedirs(os.path.join(self.la, "overdue-test"), exist_ok=True)
+        with open(os.path.join(self.la, "com.claude-agenda.old.plist"), "wb") as f:
+            plistlib.dump(dict(Label="com.claude-agenda.old", ProgramArguments=["/bin/true"],
+                               StartCalendarInterval={"Month": 1, "Day": 1, "Hour": 9, "Minute": 0}), f)
+        seeded = os.path.join(self.t, "seeded", "config.json")
+        self.tmux_state()
+        outs = {}
+        for name, path in (("none", os.path.join(blocker, "config.json")), ("seeded", seeded)):
+            e = dict(CLAUDE_AGENDA_CONFIG=path)
+            runs = [self.agenda("add", "job", "--prefix", "J", "--prompt", "/x", "--at", "9:00", "--dry-run", **e),
+                    self.agenda("list", **e),
+                    self.agenda("run", "R", "hi", "--dry-run", **e),
+                    subprocess.run([PY, OVERDUE, "--dry-run"], capture_output=True, text=True,
+                                   env=dict(self.env, LAUNCHD_OVERDUE_NOW="2026-11-08T12:00:00", **e))]
+            outs[name] = [(r.returncode, strip_times(r.stdout), r.stderr) for r in runs]
+            if name == "seeded":
+                self.assertEqual(read_bytes(seeded), read_bytes(os.path.join(ROOT, "config.example.json")))
+            else:
+                self.assertFalse(os.path.exists(path))
+        self.assertEqual(outs["none"], outs["seeded"])
+        self.assertIn("(dry-run) overdue com.claude-agenda.old", outs["seeded"][3][1])
+
+
 if __name__ == "__main__":
     unittest.main()

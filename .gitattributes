@@ -1,0 +1,3 @@
+config.example.json text eol=lf
+close-self-allow.example text eol=lf
+yearly.example.txt text eol=lf

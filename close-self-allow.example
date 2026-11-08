@@ -1,0 +1,6 @@
+# claude-close-self allow-list: one extended regex per line. A tmux session whose name matches a line
+# may be closed by claude-close-self, besides the "claude-agenda-*" sessions claude-agenda opens itself.
+# Use it when your launch_command opens sessions with other names. Blank lines and # lines are ignored.
+# Empty (the default): only "claude-agenda-*" sessions are closed.
+#
+# ^claude-(NIGHTLY|REVIEW)-
