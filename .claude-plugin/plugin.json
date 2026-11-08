@@ -1,6 +1,6 @@
 {
   "name": "launchd-agenda",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Schedule Claude Code sessions on your Mac with launchd, so they run locally with your skills, hooks and files; close each session when done and turn off one-time jobs once their date has passed.",
   "author": {
     "name": "Lucas Saldanha Werneck",

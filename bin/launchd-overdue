@@ -13,14 +13,20 @@ is reported and turned off: `launchctl bootout` + plist moved to ~/Library/Launc
 (kept; to turn it back on, move it back and `launchctl bootstrap`).
 
 --dry-run   only report, change nothing
---prefix    label prefix to check (repeatable). Default: $LAUNCHD_OVERDUE_PREFIX, else com.claude-agenda.
+--prefix    label prefix to check (repeatable). Default: $LAUNCHD_OVERDUE_PREFIX (comma-separated), else
+            overdue_prefixes from the claude-agenda config file, else its label_prefix, else com.claude-agenda.
 
 Jobs that should repeat every year: put the label on a line of ~/.config/launchd-overdue/yearly.txt
+(another file: $LAUNCHD_OVERDUE_YEARLY_FILE or yearly_file in the config file).
+Where turned-off plists go: ~/Library/LaunchAgents/overdue/ ($LAUNCHD_OVERDUE_MOVE_TO or overdue_dir).
+Config file: ~/.config/claude-agenda/config.json (or $CLAUDE_AGENDA_CONFIG), shared with claude-agenda;
+it is outside the plugin, so it survives plugin updates.
 Log: ~/Library/Logs/launchd-overdue.log (or ~/.local/state/launchd-overdue/ off macOS)
 Exit code: 0, also when something was turned off.
 """
 import datetime
 import glob
+import json
 import os
 import plistlib
 import shutil
@@ -43,6 +49,19 @@ def log(msg):
             f.write(line + "\n")
     except OSError:
         pass
+
+
+def config():
+    path = os.environ.get("CLAUDE_AGENDA_CONFIG") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config"), "claude-agenda", "config.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            c = json.load(f)
+    except Exception as e:
+        sys.exit(f"launchd-overdue: config file {path} is not valid JSON: {e}")
+    return c if isinstance(c, dict) else {}
 
 
 def now():
@@ -81,11 +100,16 @@ def main():
         return 0
     dry = "--dry-run" in argv
     prefixes = [argv[i + 1] for i, a in enumerate(argv) if a == "--prefix" and i + 1 < len(argv)]
+    cfg = config()
+    if not prefixes and os.environ.get("LAUNCHD_OVERDUE_PREFIX"):
+        prefixes = [p for p in os.environ["LAUNCHD_OVERDUE_PREFIX"].split(",") if p]
     if not prefixes:
-        prefixes = [p for p in os.environ.get("LAUNCHD_OVERDUE_PREFIX", "com.claude-agenda.").split(",") if p]
+        prefixes = list(cfg.get("overdue_prefixes") or [cfg.get("label_prefix") or "com.claude-agenda."])
     la = os.path.join(home(), "Library", "LaunchAgents")
-    dest = os.path.join(la, "overdue")
-    yearly_file = os.path.join(home(), ".config", "launchd-overdue", "yearly.txt")
+    dest = os.path.expanduser(os.environ.get("LAUNCHD_OVERDUE_MOVE_TO") or cfg.get("overdue_dir")
+                              or os.path.join(la, "overdue"))
+    yearly_file = os.path.expanduser(os.environ.get("LAUNCHD_OVERDUE_YEARLY_FILE") or cfg.get("yearly_file")
+                                     or os.path.join(home(), ".config", "launchd-overdue", "yearly.txt"))
     yearly = set()
     if os.path.exists(yearly_file):
         with open(yearly_file, encoding="utf-8") as f:

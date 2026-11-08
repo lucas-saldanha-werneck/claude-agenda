@@ -34,7 +34,7 @@ Every Monday at 09:00 a session titled `REPORT DD-MM` opens in `~/code/my-app`. 
 
 Before opening, a previous `REPORT` session is handled: idle → closed; still working → this run is
 skipped. When `claude agents --json` is not available, a previous session is closed only after
-`CLAUDE_AGENDA_STALE_HOURS` (default 12).
+`stale_hours` (default 12; see Settings).
 
 One-time job: `--date 2026-12-24 --at 10:00`. `launchd-overdue` moves it to
 `~/Library/LaunchAgents/overdue/` the day after it ran.
@@ -65,19 +65,72 @@ Requires `python3` 3.8+, `tmux` and Claude Code (`claude`).
 
 ## Settings
 
-| Environment variable | Default | What it does |
-|---|---|---|
-| `CLAUDE_AGENDA_LABEL_PREFIX` | `com.claude-agenda.` | launchd label prefix (also `--label-prefix`; `install.sh --prefix`) |
-| `CLAUDE_AGENDA_CLAUDE` | stable copy if present, else `claude` on PATH | Claude Code binary |
-| `CLAUDE_AGENDA_TMUX` | `tmux` on PATH or Homebrew | tmux binary |
-| `CLAUDE_AGENDA_LOG_DIR` | `~/Library/Logs` | where `claude-agenda.log` goes |
-| `CLAUDE_AGENDA_STALE_HOURS` | `12` | close a previous session of unknown status after this many hours |
-| `CLAUDE_CLOSE_SELF_ALLOW` | empty | extra tmux session names (extended regex) `claude-close-self` may close |
-| `LAUNCHD_OVERDUE_PREFIX` | `com.claude-agenda.` | prefixes `launchd-overdue` checks (comma-separated; also `--prefix`) |
+Settings live in `~/.config/claude-agenda/config.json` (or `$CLAUDE_AGENDA_CONFIG`). **They survive plugin
+updates:** the file is outside the plugin folder, and `/plugin update` or a new `install.sh` never touches
+it. launchd reads it on every run, so a change applies from the next run. An environment variable wins over
+the same setting in the file.
+
+| Config key | Environment variable | Default | What it does |
+|---|---|---|---|
+| `label_prefix` | `CLAUDE_AGENDA_LABEL_PREFIX` | `com.claude-agenda.` | launchd label prefix for `add`/`list`/`remove` (also `--label-prefix`; `install.sh --prefix`) |
+| `claude` | `CLAUDE_AGENDA_CLAUDE` | stable copy if present, else `claude` on PATH | Claude Code binary |
+| `tmux` | `CLAUDE_AGENDA_TMUX` | `tmux` on PATH or Homebrew | tmux binary |
+| `log_dir` | `CLAUDE_AGENDA_LOG_DIR` | `~/Library/Logs` | where `claude-agenda.log` goes |
+| `stale_hours` | `CLAUDE_AGENDA_STALE_HOURS` | `12` | close a previous session of unknown status after this many hours |
+| `default_dir` | | the current folder | folder for `run` when the job gives no `--dir` (launchd starts jobs in `/`) |
+| `dir_aliases` | | `[]` | other flag names accepted for `--dir` by `run`, such as `["--folder"]`, for jobs written by hand or by an older script |
+| `launch_command` | | built-in tmux launch | your own launcher, as a list (below) |
+| `overdue_prefixes` | `LAUNCHD_OVERDUE_PREFIX` (comma-separated) | `[label_prefix]` | label prefixes `launchd-overdue` checks (also `--prefix`) |
+| `yearly_file` | `LAUNCHD_OVERDUE_YEARLY_FILE` | `~/.config/launchd-overdue/yearly.txt` | labels of dated jobs that should repeat every year, one per line (`#` = comment) |
+| `overdue_dir` | `LAUNCHD_OVERDUE_MOVE_TO` | `~/Library/LaunchAgents/overdue` | where `launchd-overdue` moves plists it turns off |
+
+```json
+{
+  "label_prefix": "com.example.claude.",
+  "default_dir": "~/code",
+  "stale_hours": 6
+}
+```
+
+### Your own launcher (`launch_command`)
+
+By default `run` opens the session itself in a detached tmux session. If you already have a script that
+opens Claude sessions the way you like (a wrapper that retries, loads secrets, sets a window title...),
+give it as `launch_command`: a list whose items may hold `{prefix}`, `{name}` (`PREFIX DD-MM`),
+`{prompt}`, `{dir}` (as written in the job), `{dir_abs}` and `{remote_control}` (`1` or empty). The first
+item may start with `~`. No shell is involved, so a prompt with quotes or spaces stays one argument.
+
+```json
+{ "launch_command": ["~/bin/open-claude", "{dir}", "--detached", "--title", "{name}", "--prompt", "{prompt}"] }
+```
+
+Before launching, `run` still closes an idle previous session with the same prefix and skips the run
+when that session is still working (it finds the session with `claude agents --json`, and its tmux
+session from the process). With a launcher, `{dir}` is passed as written, without checking that the folder
+exists, so the launcher can resolve its own names. Its output and exit code go to the log; `--dry-run`
+prints the command instead of running it. The stale-hours rule applies only to sessions that
+claude-agenda opened itself.
+
+### Short form for hand-written jobs
+
+`claude-agenda PREFIX "PROMPT" [--dir DIR]` is the same as `claude-agenda run PREFIX "PROMPT" ...`, so jobs
+written by hand that call `claude-agenda PREFIX PROMPT` keep working. A prefix named `run`, `add`, `list`,
+`ls`, `remove`, `rm` or `help` needs the long form.
+
+### Sessions `claude-close-self` may close
+
+It closes only tmux sessions whose name starts with `claude-agenda-`. To let it close sessions opened by
+your own launcher, put one extended regex per line in `~/.config/claude-agenda/close-self-allow` (another
+file: `$CLAUDE_CLOSE_SELF_ALLOW_FILE`; blank lines and `#` lines are ignored), or set one regex in
+`CLAUDE_CLOSE_SELF_ALLOW`:
+
+```
+# sessions opened by my launcher for scheduled jobs
+^claude-(NIGHTLY|REPORT)-
+```
 
 The session runs through your login shell (`$SHELL -lc`), so your profile's PATH and variables
-apply. Jobs that should repeat every year: put the label on a line of
-`~/.config/launchd-overdue/yearly.txt`.
+apply.
 
 ## Optional requirements
 

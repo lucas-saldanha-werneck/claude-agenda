@@ -30,6 +30,17 @@ echo "$OUT" | grep -q "closes in 5s" && grep -Eq "run-shell -b sleep 5; '[^']*tm
 OUT=$(TMUX=/tmp/x FAKE_TMUX_NAME=review-7 CLAUDE_CLOSE_SELF_ALLOW='^review-[0-9]+$' sh "$CS")
 echo "$OUT" | grep -q "closes in 30s" && ok "CLAUDE_CLOSE_SELF_ALLOW + default 30 s" || bad "$OUT"
 OUT=$(TMUX=/tmp/x FAKE_TMUX_NAME=claude-agenda-x sh "$CS" abc 2>&1); [ $? = 2 ] && ok "bad delay rejected" || bad "$OUT"
+AH="$W/allowhome"; mkdir -p "$AH/.config/claude-agenda"
+printf '%s\n' '# sessions opened by my own launcher' '' '^claude-(NIGHTLY|REVIEW)-' '^ops-[0-9]+$' > "$AH/.config/claude-agenda/close-self-allow"
+OUT=$(HOME="$AH" TMUX=/tmp/x FAKE_TMUX_NAME=claude-REVIEW-9 sh "$CS" 3)
+echo "$OUT" | grep -q "closes in 3s" && ok "allow-list file: matching line" || bad "$OUT"
+OUT=$(HOME="$AH" TMUX=/tmp/x FAKE_TMUX_NAME=ops-12 sh "$CS" 3)
+echo "$OUT" | grep -q "closes in 3s" && ok "allow-list file: second pattern" || bad "$OUT"
+OUT=$(HOME="$AH" TMUX=/tmp/x FAKE_TMUX_NAME=claude-retry-5 sh "$CS" 3)
+echo "$OUT" | grep -q "not closing it" && ok "allow-list file: other session left alone" || bad "$OUT"
+printf '%s\n' '^custom-' > "$W/allow2"
+OUT=$(HOME="$AH" CLAUDE_CLOSE_SELF_ALLOW_FILE="$W/allow2" TMUX=/tmp/x FAKE_TMUX_NAME=custom-1 sh "$CS" 3)
+echo "$OUT" | grep -q "closes in 3s" && ok "CLAUDE_CLOSE_SELF_ALLOW_FILE" || bad "$OUT"
 
 echo "== install.sh"
 H="$W/home"; mkdir -p "$H"

@@ -199,15 +199,117 @@ class Run(Base):
             self.assertIn("LOGGED: rc=0", f.read())
 
 
+class Config(Base):
+    """Options from ~/.config/claude-agenda/config.json (outside the plugin, so they survive updates)."""
+
+    def config(self, **cfg):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(cfg, f)
+
+    def launcher(self, *extra):
+        return [PY, os.path.join(T, "fake_launcher.py"), *extra]
+
+    def test_short_form_is_run(self):
+        self.tmux_state()
+        r = self.agenda("REPORT", "/weekly-report", "--dir", self.work)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ns = [c for c in self.calls("tmux") if c[0] == "new-session"]
+        self.assertEqual(len(ns), 1)
+        self.assertIn("/weekly-report", ns[0][-1])
+        self.assertNotEqual(self.agenda("--bogus").returncode, 0)
+
+    def test_label_prefix_from_config_and_env_wins(self):
+        self.config(label_prefix="org.example.jobs")
+        self.agenda("add", "n1", "--prefix", "N", "--prompt", "x", "--at", "08:00", "--dir", self.work)
+        self.assertEqual(self.plist("org.example.jobs.n1.plist")["Label"], "org.example.jobs.n1")
+        self.assertIn("org.example.jobs.n1", self.agenda("list").stdout)
+        self.agenda("add", "n2", "--prefix", "N", "--prompt", "x", "--at", "08:00", "--dir", self.work,
+                    CLAUDE_AGENDA_LABEL_PREFIX="com.env.")
+        self.assertTrue(os.path.exists(os.path.join(self.la, "com.env.n2.plist")))
+
+    def test_launch_command_replaces_tmux_launch(self):
+        self.tmux_state()
+        self.config(launch_command=self.launcher("{dir}", "--name", "{name}", "--prompt", "{prompt}",
+                                                 "--prefix={prefix}", "rc={remote_control}"))
+        r = self.agenda("NIGHTLY", "/inbox", "--dir", "some/relative/name")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        name = f"NIGHTLY {datetime.datetime.now():%d-%m}"
+        self.assertEqual(self.calls("launcher"), [["some/relative/name", "--name", name, "--prompt", "/inbox",
+                                                   "--prefix=NIGHTLY", "rc="]])
+        self.assertEqual([c for c in self.calls("tmux") if c[0] == "new-session"], [])
+        self.assertIn("NIGHTLY: rc=0 launch_command=", r.stdout)
+        self.assertIn("launched", r.stdout)
+
+    def test_launch_command_still_closes_idle_and_respects_busy(self):
+        self.config(launch_command=self.launcher("{name}"))
+        self.tmux_state({"claude-x-1": 1}, {"4242": "claude-x-1"})
+        idle = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 4242}])
+        self.agenda("R", "hi", FAKE_AGENTS=idle)
+        self.assertEqual([c for c in self.calls("tmux") if c[0] == "kill-session"], [["kill-session", "-t", "claude-x-1"]])
+        self.assertEqual(len(self.calls("launcher")), 1)
+        busy = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "busy", "pid": 4242}])
+        self.agenda("R", "hi", FAKE_AGENTS=busy)
+        self.assertEqual(len(self.calls("launcher")), 1, "busy previous session: no new launch")
+
+    def test_launch_command_exit_code_and_dry_run(self):
+        self.tmux_state()
+        self.config(launch_command=self.launcher())
+        r = self.agenda("R", "hi", "--dry-run")
+        self.assertIn("(dry-run) would run", r.stdout)
+        self.assertEqual(self.calls("launcher"), [])
+        r = self.agenda("R", "hi", FAKE_LAUNCH_RC="7")
+        self.assertEqual(r.returncode, 7)
+        self.assertIn("rc=7", r.stdout)
+
+    def test_bad_launch_command_is_rejected(self):
+        self.tmux_state()
+        self.config(launch_command="not a list")
+        r = self.agenda("R", "hi")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("must be a list", r.stderr)
+        self.config(launch_command=self.launcher("{nope}"))
+        self.assertIn("placeholders", self.agenda("R", "hi").stderr)
+
+    def test_default_dir_and_dir_aliases(self):
+        self.tmux_state()
+        other = os.path.join(self.t, "other")
+        os.makedirs(other)
+        self.config(default_dir=self.work, dir_aliases=["--folder"])
+        self.agenda("R", "hi")
+        ns = [c for c in self.calls("tmux") if c[0] == "new-session"]
+        self.assertEqual(ns[-1][ns[-1].index("-c") + 1], self.work)
+        self.agenda("R2", "hi", "--folder", other)
+        ns = [c for c in self.calls("tmux") if c[0] == "new-session"]
+        self.assertEqual(ns[-1][ns[-1].index("-c") + 1], other)
+
+    def test_stale_hours_and_tools_from_config(self):
+        self.config(stale_hours=0.01, tmux=os.path.join(T, "fake_tmux.py"))
+        self.tmux_state({"claude-agenda-R-1": int(time.time()) - 600})
+        env = {"CLAUDE_AGENDA_TMUX": ""}
+        r = self.agenda("R", "hi", FAKE_AGENTS_FAIL="1", **env)
+        self.assertIn("closing stale", r.stdout)
+
+    def test_bad_config_json_is_reported(self):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            f.write("{nope")
+        r = self.agenda("list")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not valid JSON", r.stderr)
+
+
 class Overdue(Base):
     def write(self, label, cal, **extra):
         os.makedirs(self.la, exist_ok=True)
         with open(os.path.join(self.la, label + ".plist"), "wb") as f:
             plistlib.dump(dict(Label=label, ProgramArguments=["/bin/true"], StartCalendarInterval=cal, **extra), f)
 
-    def run_overdue(self, *args, now="2026-11-08T12:00:00"):
+    def run_overdue(self, *args, now="2026-11-08T12:00:00", **env):
         return subprocess.run([PY, OVERDUE, *args], capture_output=True, text=True,
-                              env=dict(self.env, LAUNCHD_OVERDUE_NOW=now))
+                              env=dict(self.env, LAUNCHD_OVERDUE_NOW=now, **env))
 
     def setUp(self):
         super().setUp()
@@ -245,6 +347,37 @@ class Overdue(Base):
         self.run_overdue("--prefix", "org.other.")
         self.assertNotIn("org.other.past.plist", self.left())
         self.assertIn("com.claude-agenda.past.plist", self.left())
+
+    def write_config(self, **cfg):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(cfg, f)
+
+    def test_config_prefixes_yearly_file_and_move_to(self):
+        yearly = os.path.join(self.t, "annual.txt")
+        with open(yearly, "w") as f:
+            f.write("org.other.past\n")
+        dest = os.path.join(self.t, "turned-off")
+        self.write("org.other.gone", {"Month": 2, "Day": 2})
+        self.write_config(overdue_prefixes=["org.other."], yearly_file=yearly, overdue_dir=dest)
+        r = self.run_overdue()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("org.other.past.plist", self.left(), "listed in the configured yearly file")
+        self.assertTrue(os.path.exists(os.path.join(dest, "org.other.gone.plist")))
+        self.assertIn("com.claude-agenda.past.plist", self.left(), "only the configured prefixes")
+
+    def test_label_prefix_from_config_is_the_default(self):
+        self.write_config(label_prefix="org.other.")
+        self.run_overdue()
+        self.assertNotIn("org.other.past.plist", self.left())
+
+    def test_env_overrides_config(self):
+        self.write_config(overdue_prefixes=["org.other."])
+        self.run_overdue(LAUNCHD_OVERDUE_YEARLY_FILE=os.path.join(self.t, "none.txt"),
+                         LAUNCHD_OVERDUE_PREFIX="com.claude-agenda.")
+        self.assertNotIn("com.claude-agenda.birthday.plist", self.left(), "the yearly file from env has no entries")
+        self.assertIn("org.other.past.plist", self.left())
 
 
 if __name__ == "__main__":

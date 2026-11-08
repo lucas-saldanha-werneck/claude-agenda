@@ -8,6 +8,7 @@ Usage:
   claude-agenda list
   claude-agenda remove NAME [--dry-run]
   claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]
+  claude-agenda PREFIX PROMPT [...]      same as `run` (short form, for jobs written by hand)
 
 `add` writes a launchd job (~/Library/LaunchAgents/<label-prefix><NAME>.plist) that calls
 `claude-agenda run` at the given times. It loads the job only with --load.
@@ -23,6 +24,10 @@ still working -> this run is skipped.
 
 --date makes a one-time job. launchd has no year, so the job would repeat every year on that day;
 `launchd-overdue` (installed next to this script) disables it once the date has passed.
+
+Config file: ~/.config/claude-agenda/config.json (or $CLAUDE_AGENDA_CONFIG). It lives outside the plugin,
+so it survives plugin updates. Keys: label_prefix, claude, tmux, log_dir, stale_hours, default_dir,
+dir_aliases, launch_command (see README). An environment variable wins over the same key in the file.
 
 Environment:
   CLAUDE_AGENDA_LABEL_PREFIX  launchd label prefix (default com.claude-agenda.)
@@ -52,8 +57,37 @@ def home():
     return os.environ.get("HOME") or os.path.expanduser("~")
 
 
+_CONFIG = None
+
+
+def config():
+    """~/.config/claude-agenda/config.json (or $CLAUDE_AGENDA_CONFIG); {} when absent."""
+    global _CONFIG
+    if _CONFIG is None:
+        path = os.environ.get("CLAUDE_AGENDA_CONFIG") or os.path.join(
+            os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config"), "claude-agenda", "config.json")
+        _CONFIG = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    _CONFIG = json.load(f)
+            except Exception as e:
+                sys.exit(f"claude-agenda: config file {path} is not valid JSON: {e}")
+            if not isinstance(_CONFIG, dict):
+                sys.exit(f"claude-agenda: config file {path} must hold a JSON object")
+    return _CONFIG
+
+
+def setting(key, env=None, default=None):
+    """Environment variable, else config key, else default."""
+    if env and os.environ.get(env):
+        return os.environ[env]
+    v = config().get(key)
+    return default if v is None or v == "" else v
+
+
 def label_prefix(override=None):
-    p = override or os.environ.get("CLAUDE_AGENDA_LABEL_PREFIX") or "com.claude-agenda."
+    p = override or setting("label_prefix", "CLAUDE_AGENDA_LABEL_PREFIX", "com.claude-agenda.")
     return p if p.endswith(".") else p + "."
 
 
@@ -62,8 +96,10 @@ def agents_dir():
 
 
 def log_dir():
-    d = os.environ.get("CLAUDE_AGENDA_LOG_DIR")
-    if not d:
+    d = setting("log_dir", "CLAUDE_AGENDA_LOG_DIR")
+    if d:
+        d = os.path.expanduser(d)
+    else:
         lib = os.path.join(home(), "Library", "Logs")
         d = lib if sys.platform == "darwin" or os.path.isdir(lib) else \
             os.path.join(home(), ".local", "state", "claude-agenda")
@@ -81,10 +117,11 @@ def log(msg):
         pass
 
 
-def tool(env_name, *defaults):
+def tool(env_name, *defaults, key=None):
     """Command list for a tool. An override ending in .py runs with this Python (used by tests)."""
-    v = os.environ.get(env_name)
+    v = setting(key, env_name) if key else os.environ.get(env_name)
     if v:
+        v = os.path.expanduser(v)
         if v.endswith(".py"):
             return [sys.executable, v]
         found = v if os.path.exists(v) else shutil.which(v)
@@ -100,11 +137,11 @@ def tool(env_name, *defaults):
 
 def claude_cmd():
     stable = os.path.join(home(), ".local", "libexec", "claude-stable", "claude")
-    return tool("CLAUDE_AGENDA_CLAUDE", stable, "claude")
+    return tool("CLAUDE_AGENDA_CLAUDE", stable, "claude", key="claude")
 
 
 def tmux_cmd():
-    return tool("CLAUDE_AGENDA_TMUX", "tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
+    return tool("CLAUDE_AGENDA_TMUX", "tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", key="tmux")
 
 
 def launchctl_cmd():
@@ -208,13 +245,37 @@ def login_shell():
     return "sh"
 
 
+def launch_command():
+    """launch_command from the config: a list of strings, or None for the built-in tmux launch."""
+    v = config().get("launch_command")
+    if not v:
+        return None
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        sys.exit("claude-agenda: launch_command must be a list of strings")
+    return v
+
+
+def fill_launch(template, values):
+    out = []
+    for i, x in enumerate(template):
+        try:
+            x = x.format(**values)
+        except (KeyError, IndexError, ValueError) as e:
+            sys.exit(f"claude-agenda: launch_command item {x!r} is invalid ({e}); "
+                     f"placeholders: {', '.join('{' + k + '}' for k in values)}")
+        out.append(os.path.expanduser(x) if i == 0 else x)
+    return out
+
+
 def cmd_run(argv):
-    folder, rc_flag, dry = os.getcwd(), False, False
+    custom = launch_command()
+    folder, rc_flag, dry = setting("default_dir", default=None), False, False
+    dir_flags = ["--dir"] + list(config().get("dir_aliases") or [])
     rest = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--dir" and i + 1 < len(argv):
+        if a in dir_flags and i + 1 < len(argv):
             folder = argv[i + 1]
             i += 2
             continue
@@ -228,8 +289,10 @@ def cmd_run(argv):
     if len(rest) != 2:
         sys.exit("usage: claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]")
     prefix, prompt = rest[0].strip(), rest[1]
-    folder = os.path.abspath(os.path.expanduser(folder))
-    if not os.path.isdir(folder):
+    raw_folder = folder if folder is not None else os.getcwd()
+    folder = os.path.abspath(os.path.expanduser(raw_folder))
+    if not custom and not os.path.isdir(folder):
+        # with a launch_command the folder is passed as given: the launcher may resolve it itself
         log(f"{prefix}: error - folder not found: {folder}")
         return 1
     tm = tmux_cmd()
@@ -237,7 +300,7 @@ def cmd_run(argv):
         log(f"{prefix}: error - tmux not found. Install it (brew install tmux) or set CLAUDE_AGENDA_TMUX.")
         return 1
     claude = claude_cmd()
-    if not claude:
+    if not claude and not custom:
         log(f"{prefix}: error - claude not found. Install Claude Code or set CLAUDE_AGENDA_CLAUDE.")
         return 1
     name = f"{prefix} {datetime.datetime.now():%d-%m}"
@@ -263,8 +326,8 @@ def cmd_run(argv):
 
     # 2) our tmux sessions with unknown status: close only when older than the stale limit
     try:
-        stale_h = float(os.environ.get("CLAUDE_AGENDA_STALE_HOURS", "12"))
-    except ValueError:
+        stale_h = float(setting("stale_hours", "CLAUDE_AGENDA_STALE_HOURS", 12))
+    except (TypeError, ValueError):
         stale_h = 12.0
     now = datetime.datetime.now().timestamp()
     for sess, created in sessions.items():
@@ -278,6 +341,21 @@ def cmd_run(argv):
         log(f"{prefix}: closing stale tmux session '{sess}' ({age_h:.1f} h old)")
         if not dry:
             subprocess.run(tm + ["kill-session", "-t", sess], capture_output=True)
+
+    if custom:
+        cmd = fill_launch(custom, {"prefix": prefix, "name": name, "prompt": prompt, "dir": raw_folder,
+                                   "dir_abs": folder, "remote_control": "1" if rc_flag else ""})
+        if dry:
+            log(f"{prefix}: (dry-run) would run: {' '.join(shlex.quote(c) for c in cmd)}")
+            return 0
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=folder if os.path.isdir(folder) else None)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log(f"{prefix}: error - launch_command failed to run ({e})")
+            return 1
+        out = " | ".join((r.stdout + r.stderr).strip().splitlines())
+        log(f"{prefix}: rc={r.returncode} launch_command={os.path.basename(cmd[0])}" + (f" {out}" if out else ""))
+        return r.returncode
 
     tsess = f"{mine}{int(now)}"
     inner = tmux_inner(claude, name, prompt, rc_flag)
@@ -490,6 +568,8 @@ def main():
         return 0
     cmds = {"run": cmd_run, "add": cmd_add, "list": cmd_list, "ls": cmd_list, "remove": cmd_remove, "rm": cmd_remove}
     if argv[0] not in cmds:
+        if not argv[0].startswith("-"):
+            return cmd_run(argv)  # short form: claude-agenda PREFIX PROMPT [...]
         sys.exit(f"claude-agenda: unknown command '{argv[0]}'. See: claude-agenda --help")
     return cmds[argv[0]](argv[1:])
 
