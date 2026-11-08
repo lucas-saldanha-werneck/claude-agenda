@@ -56,10 +56,10 @@ The plugin adds a skill so you can just ask Claude ("run /weekly-report every Mo
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-agenda
-/plugin install claude-agenda@claude-agenda
+/plugin install launchd-agenda@launchd-agenda
 ```
 
-The skill uses the `claude-agenda` installed by `install.sh`, so run that too.
+The plugin is called `launchd-agenda` because Claude Code reserves plugin names that start with `claude-`. The skill uses the `claude-agenda` installed by `install.sh`, so run that too.
 
 Requires `python3` 3.8+, `tmux` and Claude Code (`claude`).
 
