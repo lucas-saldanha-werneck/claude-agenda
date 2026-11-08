@@ -1,0 +1,15 @@
+{
+  "name": "claude-agenda",
+  "description": "Schedule local Claude Code sessions on your Mac with launchd.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "claude-agenda",
+      "source": "./",
+      "description": "Schedule Claude Code sessions on your Mac with launchd, so they run locally with your skills, hooks and files; close each session when done and turn off one-time jobs once their date has passed."
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+#!/bin/sh
+# claude-close-self [seconds]
+# Last step of a session opened by claude-agenda: closes its OWN tmux session after N seconds
+# (default 30), so the final answer reaches the app / Remote Control before the session goes away.
+#
+# Safety: it only acts on tmux sessions whose name starts with "claude-agenda-" (the names
+# claude-agenda gives them), or matches the extended regex in CLAUDE_CLOSE_SELF_ALLOW.
+# Any other session (your normal work) is left alone. Outside tmux it does nothing.
+delay=${1:-30}
+case "$delay" in ''|*[!0-9]*) echo "claude-close-self: seconds must be a number" >&2; exit 2 ;; esac
+if [ -z "${TMUX:-}" ]; then
+  echo "claude-close-self: not inside tmux - nothing to close"
+  exit 0
+fi
+TM=$(command -v tmux || { [ -x /opt/homebrew/bin/tmux ] && echo /opt/homebrew/bin/tmux; } || echo tmux)
+sess=$("$TM" display-message -p '#S' 2>/dev/null)
+allowed=no
+case "$sess" in claude-agenda-*) allowed=yes ;; esac
+if [ "$allowed" = no ] && [ -n "${CLAUDE_CLOSE_SELF_ALLOW:-}" ] \
+   && printf '%s\n' "$sess" | grep -Eq -- "$CLAUDE_CLOSE_SELF_ALLOW"; then
+  allowed=yes
+fi
+if [ "$allowed" = no ]; then
+  echo "claude-close-self: session '$sess' was not opened by claude-agenda - not closing it"
+  exit 0
+fi
+# The tmux server itself waits and kills (run-shell -b): a child of Claude's Bash tool dies when the
+# command returns, so `nohup ... &` would not survive.
+"$TM" run-shell -b "sleep $delay; '$TM' kill-session -t '$sess'"
+echo "claude-close-self: '$sess' closes in ${delay}s"

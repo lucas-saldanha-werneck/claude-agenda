@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+"""claude-agenda: schedule Claude Code sessions on your Mac with launchd.
+
+Usage:
+  claude-agenda add NAME --prefix PREFIX --prompt TEXT --at HH:MM [--at HH:MM ...]
+                [--weekday DAY ...] [--day N] [--date [YYYY-]MM-DD] [--dir DIR]
+                [--remote-control] [--load] [--dry-run]
+  claude-agenda list
+  claude-agenda remove NAME [--dry-run]
+  claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]
+
+`add` writes a launchd job (~/Library/LaunchAgents/<label-prefix><NAME>.plist) that calls
+`claude-agenda run` at the given times. It loads the job only with --load.
+`run` is what launchd calls: it opens an interactive Claude Code session named
+"PREFIX DD-MM" in a detached tmux session, with PROMPT as the first message.
+
+Why launchd and not cloud routines: a local session has your skills, hooks, MCP servers and files.
+launchd runs with no app open and, if the Mac was asleep at the scheduled time, runs the job when
+it wakes up (man launchd.plist).
+
+Before opening, a previous session of the same PREFIX is handled: idle -> closed;
+still working -> this run is skipped.
+
+--date makes a one-time job. launchd has no year, so the job would repeat every year on that day;
+`launchd-overdue` (installed next to this script) disables it once the date has passed.
+
+Environment:
+  CLAUDE_AGENDA_LABEL_PREFIX  launchd label prefix (default com.claude-agenda.)
+  CLAUDE_AGENDA_CLAUDE        claude binary (default: the stable copy from stable-sync if present,
+                              else `claude` on PATH)
+  CLAUDE_AGENDA_TMUX          tmux binary (default: tmux on PATH or Homebrew)
+  CLAUDE_AGENDA_LAUNCHCTL     launchctl binary (default launchctl)
+  CLAUDE_AGENDA_LOG_DIR       log folder (default ~/Library/Logs, or ~/.local/state/claude-agenda)
+  CLAUDE_AGENDA_STALE_HOURS   close a previous session whose status is unknown after this many
+                              hours (default 12)
+"""
+import datetime
+import json
+import os
+import plistlib
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+TMUX_PREFIX = "claude-agenda-"   # claude-close-self only acts on tmux sessions with this prefix
+WEEKDAYS = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
+
+
+def home():
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def label_prefix(override=None):
+    p = override or os.environ.get("CLAUDE_AGENDA_LABEL_PREFIX") or "com.claude-agenda."
+    return p if p.endswith(".") else p + "."
+
+
+def agents_dir():
+    return os.path.join(home(), "Library", "LaunchAgents")
+
+
+def log_dir():
+    d = os.environ.get("CLAUDE_AGENDA_LOG_DIR")
+    if not d:
+        lib = os.path.join(home(), "Library", "Logs")
+        d = lib if sys.platform == "darwin" or os.path.isdir(lib) else \
+            os.path.join(home(), ".local", "state", "claude-agenda")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def log(msg):
+    line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
+    print(line)
+    try:
+        with open(os.path.join(log_dir(), "claude-agenda.log"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def tool(env_name, *defaults):
+    """Command list for a tool. An override ending in .py runs with this Python (used by tests)."""
+    v = os.environ.get(env_name)
+    if v:
+        if v.endswith(".py"):
+            return [sys.executable, v]
+        found = v if os.path.exists(v) else shutil.which(v)
+        return [found] if found else None
+    for d in defaults:
+        if os.path.isabs(d):
+            if os.path.exists(d):
+                return [d]
+        elif shutil.which(d):
+            return [shutil.which(d)]
+    return None
+
+
+def claude_cmd():
+    stable = os.path.join(home(), ".local", "libexec", "claude-stable", "claude")
+    return tool("CLAUDE_AGENDA_CLAUDE", stable, "claude")
+
+
+def tmux_cmd():
+    return tool("CLAUDE_AGENDA_TMUX", "tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
+
+
+def launchctl_cmd():
+    return tool("CLAUDE_AGENDA_LAUNCHCTL", "launchctl")
+
+
+def safe(s):
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", s).strip("-") or "job"
+
+
+def uid():
+    return getattr(os, "getuid", lambda: 0)()
+
+
+# ---------------------------------------------------------------- run
+
+def agents():
+    """Sessions from `claude agents --json`; [] when unavailable (older Claude Code, no binary)."""
+    c = claude_cmd()
+    if not c:
+        return []
+    try:
+        out = subprocess.run(c + ["agents", "--json"], capture_output=True, text=True, timeout=30).stdout
+        data = json.loads(out or "[]")
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log(f"note: `claude agents --json` failed ({e}); session status unknown")
+        return []
+
+
+def tmux_sessions(tm):
+    """{session_name: created_epoch} on the current tmux server ({} if no server)."""
+    try:
+        r = subprocess.run(tm + ["list-sessions", "-F", "#{session_name} #{session_created}"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return {}
+    out = {}
+    for line in r.stdout.splitlines():
+        name, _, created = line.rpartition(" ")
+        if name:
+            out[name] = int(created) if created.isdigit() else 0
+    return out
+
+
+def tmux_session_of(tm, pid):
+    """tmux session that holds process pid (walks up the process tree to the pane)."""
+    try:
+        panes = subprocess.run(tm + ["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"],
+                               capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except Exception:
+        return None
+    pane = {l.split(" ", 1)[0]: l.split(" ", 1)[1] for l in panes if " " in l}
+    x = str(pid)
+    for _ in range(12):
+        if x in pane:
+            return pane[x]
+        try:
+            x = subprocess.run(["ps", "-o", "ppid=", "-p", x], capture_output=True, text=True).stdout.strip()
+        except Exception:
+            return None
+        if not x or x in ("0", "1"):
+            return None
+    return None
+
+
+SCRUB = ("for v in $(env | sed -n 's/^\\(CLAUDE[A-Za-z0-9_]*\\)=.*/\\1/p'); do "
+         "case \"$v\" in CLAUDE_CODE_*|CLAUDE_AGENT_SDK_*|CLAUDECODE|CLAUDE_PID) unset \"$v\";; esac; done; ")
+
+
+def session_command(claude, name, prompt, remote_control):
+    """Line run by the login shell inside the tmux session."""
+    args = [*claude, "-n", name]
+    if remote_control:
+        args += ["--remote-control", name]
+    args.append(prompt)
+    # Nobody is watching a scheduled session: without this the notification code may think the user
+    # is at the terminal and skip the push notification.
+    return "CLAUDE_CODE_DISABLE_NOTIFICATION_PRESENCE_CHECK=1 exec " + " ".join(shlex.quote(a) for a in args)
+
+
+def tmux_inner(claude, name, prompt, remote_control):
+    """Command given to `tmux new-session`.
+
+    A tmux server started from another Claude session passes its variables to every new window; an
+    inherited CLAUDE_CODE_* (e.g. CLAUDE_CODE_CHILD_SESSION) turns transcript saving off and hides the
+    session from `claude agents`. They are cleared BEFORE the login shell, so anything your shell
+    profile sets (e.g. a provider setting) still applies.
+    """
+    line = session_command(claude, name, prompt, remote_control)
+    return SCRUB + f"exec {shlex.quote(login_shell())} -lc {shlex.quote(line)}"
+
+
+def login_shell():
+    sh = os.environ.get("SHELL")
+    if sh and os.path.exists(sh):
+        return sh
+    for s in ("/bin/zsh", "/bin/bash", "/bin/sh"):
+        if os.path.exists(s):
+            return s
+    return "sh"
+
+
+def cmd_run(argv):
+    folder, rc_flag, dry = os.getcwd(), False, False
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--dir" and i + 1 < len(argv):
+            folder = argv[i + 1]
+            i += 2
+            continue
+        if a == "--remote-control":
+            rc_flag = True
+        elif a == "--dry-run":
+            dry = True
+        else:
+            rest.append(a)
+        i += 1
+    if len(rest) != 2:
+        sys.exit("usage: claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]")
+    prefix, prompt = rest[0].strip(), rest[1]
+    folder = os.path.abspath(os.path.expanduser(folder))
+    if not os.path.isdir(folder):
+        log(f"{prefix}: error - folder not found: {folder}")
+        return 1
+    tm = tmux_cmd()
+    if not tm:
+        log(f"{prefix}: error - tmux not found. Install it (brew install tmux) or set CLAUDE_AGENDA_TMUX.")
+        return 1
+    claude = claude_cmd()
+    if not claude:
+        log(f"{prefix}: error - claude not found. Install Claude Code or set CLAUDE_AGENDA_CLAUDE.")
+        return 1
+    name = f"{prefix} {datetime.datetime.now():%d-%m}"
+    mine = TMUX_PREFIX + safe(prefix) + "-"
+    sessions = tmux_sessions(tm)
+    handled = set()
+
+    # 1) sessions Claude itself knows about (status idle/busy)
+    for a in agents():
+        if a.get("kind", "interactive") != "interactive" or not str(a.get("name", "")).startswith(prefix + " "):
+            continue
+        if a.get("status") == "busy":
+            log(f"{prefix}: skipped - '{a['name']}' is still working (pid {a.get('pid')})")
+            return 0
+        sess = tmux_session_of(tm, a.get("pid"))
+        if not sess:
+            log(f"{prefix}: skipped - '{a['name']}' is open outside tmux (pid {a.get('pid')}); not closing it")
+            return 0
+        log(f"{prefix}: closing idle session '{a['name']}' (tmux {sess})")
+        handled.add(sess)
+        if not dry:
+            subprocess.run(tm + ["kill-session", "-t", sess], capture_output=True)
+
+    # 2) our tmux sessions with unknown status: close only when older than the stale limit
+    try:
+        stale_h = float(os.environ.get("CLAUDE_AGENDA_STALE_HOURS", "12"))
+    except ValueError:
+        stale_h = 12.0
+    now = datetime.datetime.now().timestamp()
+    for sess, created in sessions.items():
+        if not sess.startswith(mine) or sess in handled:
+            continue
+        age_h = (now - created) / 3600 if created else 0
+        if age_h < stale_h:
+            log(f"{prefix}: skipped - previous tmux session '{sess}' is still open "
+                f"({age_h:.1f} h, status unknown; closed after {stale_h:g} h)")
+            return 0
+        log(f"{prefix}: closing stale tmux session '{sess}' ({age_h:.1f} h old)")
+        if not dry:
+            subprocess.run(tm + ["kill-session", "-t", sess], capture_output=True)
+
+    tsess = f"{mine}{int(now)}"
+    inner = tmux_inner(claude, name, prompt, rc_flag)
+    cmd = tm + ["new-session", "-d", "-s", tsess, "-c", folder, inner]
+    if dry:
+        log(f"{prefix}: (dry-run) would run: {' '.join(shlex.quote(c) for c in cmd)}")
+        return 0
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"{prefix}: error - could not start tmux ({e})")
+        return 1
+    out = " | ".join((r.stdout + r.stderr).strip().splitlines())
+    log(f"{prefix}: rc={r.returncode} tmux={tsess} folder={folder}" + (f" {out}" if out else ""))
+    if r.returncode == 0:
+        print(f"attach with: tmux attach -t {tsess}")
+    return r.returncode
+
+
+# ---------------------------------------------------------------- add / list / remove
+
+def parse_time(s):
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        sys.exit(f"claude-agenda: bad --at '{s}' (use HH:MM)")
+    return int(m.group(1)), int(m.group(2))
+
+
+def parse_weekday(s):
+    k = s.strip().lower()[:3]
+    if k in WEEKDAYS:
+        return WEEKDAYS[k]
+    if k.isdigit() and 0 <= int(k) <= 7:
+        return int(k) % 7
+    sys.exit(f"claude-agenda: bad --weekday '{s}' (mon..sun or 0-7)")
+
+
+def parse_date(s):
+    m = re.fullmatch(r"(?:(\d{4})-)?(\d{1,2})-(\d{1,2})", s)
+    if not m:
+        sys.exit(f"claude-agenda: bad --date '{s}' (use YYYY-MM-DD or MM-DD)")
+    year, month, day = (int(m.group(1)) if m.group(1) else None), int(m.group(2)), int(m.group(3))
+    try:
+        datetime.date(year or 2000, month, day)
+    except ValueError:
+        sys.exit(f"claude-agenda: bad --date '{s}'")
+    if year and year != datetime.date.today().year:
+        print(f"warning: launchd has no year; this job fires on {month:02d}-{day:02d} of the current year "
+              f"(or the next one if that date has passed)", file=sys.stderr)
+    return month, day
+
+
+def build_plist(label, prefix, prompt, folder, times, weekdays, day, date, remote_control):
+    me = os.path.abspath(sys.argv[0])
+    args = [sys.executable, me, "run", prefix, prompt, "--dir", folder] + (["--remote-control"] if remote_control else [])
+    cals = []
+    for h, m in times:
+        base = {"Hour": h, "Minute": m}
+        if date:
+            base.update(Month=date[0], Day=date[1])
+        if day:
+            base["Day"] = day
+        if weekdays:
+            cals += [dict(base, Weekday=w) for w in weekdays]
+        else:
+            cals.append(base)
+    out = os.path.join(log_dir(), "claude-agenda.out")
+    h = home()
+    return {
+        "Label": label,
+        "ProgramArguments": args,
+        "StartCalendarInterval": cals if len(cals) > 1 else cals[0],
+        "EnvironmentVariables": {"PATH": f"{h}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+        "StandardOutPath": out,
+        "StandardErrorPath": out,
+    }
+
+
+def take(argv, flag, multi=False, has_value=True):
+    vals = []
+    while flag in argv:
+        i = argv.index(flag)
+        if has_value:
+            if i + 1 >= len(argv):
+                sys.exit(f"claude-agenda: {flag} needs a value")
+            vals.append(argv[i + 1])
+            del argv[i:i + 2]
+        else:
+            vals.append(True)
+            del argv[i]
+    if multi:
+        return vals
+    return vals[-1] if vals else None
+
+
+def cmd_add(argv):
+    argv = list(argv)
+    prefix = take(argv, "--prefix")
+    prompt = take(argv, "--prompt")
+    times = [parse_time(t) for t in take(argv, "--at", multi=True)]
+    weekdays = sorted({parse_weekday(w) for w in take(argv, "--weekday", multi=True)})
+    day = take(argv, "--day")
+    date = take(argv, "--date")
+    folder = take(argv, "--dir") or os.getcwd()
+    lp = take(argv, "--label-prefix")
+    rc_flag = bool(take(argv, "--remote-control", has_value=False))
+    load = bool(take(argv, "--load", has_value=False))
+    dry = bool(take(argv, "--dry-run", has_value=False))
+    if len(argv) != 1 or not prefix or not prompt or not times:
+        sys.exit("usage: claude-agenda add NAME --prefix PREFIX --prompt TEXT --at HH:MM "
+                 "[--weekday DAY] [--day N] [--date [YYYY-]MM-DD] [--dir DIR] [--remote-control] [--load] [--dry-run]")
+    if date and (day or weekdays):
+        sys.exit("claude-agenda: --date cannot be combined with --day or --weekday")
+    if day is not None:
+        if not day.isdigit() or not 1 <= int(day) <= 31:
+            sys.exit(f"claude-agenda: bad --day '{day}' (1-31)")
+        day = int(day)
+    date = parse_date(date) if date else None
+    folder = os.path.abspath(os.path.expanduser(folder))
+    if not os.path.isdir(folder):
+        sys.exit(f"claude-agenda: folder not found: {folder}")
+    label = label_prefix(lp) + safe(argv[0])
+    path = os.path.join(agents_dir(), label + ".plist")
+    data = build_plist(label, prefix, prompt, folder, times, weekdays, day, date, rc_flag)
+    if dry:
+        print(f"(dry-run) would write {path}:")
+        print(plistlib.dumps(data).decode())
+        return 0
+    os.makedirs(agents_dir(), exist_ok=True)
+    with open(path, "wb") as f:
+        plistlib.dump(data, f)
+    print(f"wrote {path}")
+    if date:
+        print("one-time job: run `launchd-overdue` daily (install.sh sets that up) so it does not repeat next year")
+    if not load:
+        print(f"not loaded. Load it with: launchctl bootstrap gui/{uid()} '{path}'  (or re-run with --load)")
+        return 0
+    lc = launchctl_cmd()
+    if not lc or sys.platform != "darwin" and not os.environ.get("CLAUDE_AGENDA_LAUNCHCTL"):
+        print("launchd is macOS-only: plist written, not loaded")
+        return 0
+    subprocess.run(lc + ["bootout", f"gui/{uid()}/{label}"], capture_output=True)  # reload if it was loaded
+    r = subprocess.run(lc + ["bootstrap", f"gui/{uid()}", path], capture_output=True, text=True)
+    print(f"loaded {label}" if r.returncode == 0 else f"launchctl bootstrap failed (rc={r.returncode}): {r.stderr.strip()}")
+    return r.returncode
+
+
+def describe(cal):
+    cals = cal if isinstance(cal, list) else [cal] if isinstance(cal, dict) else []
+    names = {v: k for k, v in WEEKDAYS.items()}
+    parts = []
+    for c in cals:
+        s = f"{c.get('Hour', 0):02d}:{c.get('Minute', 0):02d}"
+        if "Weekday" in c:
+            s = f"{names.get(c['Weekday'] % 7, c['Weekday'])} {s}"
+        if "Month" in c:
+            s = f"{c['Month']:02d}-{c.get('Day', 1):02d} {s}"
+        elif "Day" in c:
+            s = f"day {c['Day']} {s}"
+        parts.append(s)
+    return ", ".join(parts) or "-"
+
+
+def cmd_list(argv):
+    lp = take(list(argv), "--label-prefix")
+    d = agents_dir()
+    files = sorted(f for f in os.listdir(d) if f.startswith(label_prefix(lp)) and f.endswith(".plist")) \
+        if os.path.isdir(d) else []
+    if not files:
+        print(f"no jobs with prefix {label_prefix(lp)} in {d}")
+        return 0
+    for f in files:
+        try:
+            with open(os.path.join(d, f), "rb") as fh:
+                p = plistlib.load(fh)
+        except Exception as e:
+            print(f"{f}: unreadable ({e})")
+            continue
+        args = p.get("ProgramArguments", [])
+        what = " ".join(args[args.index("run") + 1:args.index("run") + 3]) if "run" in args else " ".join(args[1:])
+        print(f"{p.get('Label', f[:-6])}  [{describe(p.get('StartCalendarInterval'))}]  {what}")
+    return 0
+
+
+def cmd_remove(argv):
+    argv = list(argv)
+    lp = take(argv, "--label-prefix")
+    dry = bool(take(argv, "--dry-run", has_value=False))
+    if len(argv) != 1:
+        sys.exit("usage: claude-agenda remove NAME [--dry-run]")
+    label = argv[0] if argv[0].startswith(label_prefix(lp)) else label_prefix(lp) + safe(argv[0])
+    path = os.path.join(agents_dir(), label + ".plist")
+    if not os.path.exists(path):
+        sys.exit(f"claude-agenda: no job {path}")
+    if dry:
+        print(f"(dry-run) would unload {label} and delete {path}")
+        return 0
+    lc = launchctl_cmd()
+    if lc and (sys.platform == "darwin" or os.environ.get("CLAUDE_AGENDA_LAUNCHCTL")):
+        subprocess.run(lc + ["bootout", f"gui/{uid()}/{label}"], capture_output=True)
+    os.remove(path)
+    print(f"removed {label}")
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmds = {"run": cmd_run, "add": cmd_add, "list": cmd_list, "ls": cmd_list, "remove": cmd_remove, "rm": cmd_remove}
+    if argv[0] not in cmds:
+        sys.exit(f"claude-agenda: unknown command '{argv[0]}'. See: claude-agenda --help")
+    return cmds[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

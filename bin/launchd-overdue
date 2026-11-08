@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""launchd-overdue [--dry-run] [--prefix LABEL_PREFIX ...]
+
+Finds one-time launchd jobs whose date has passed and turns them off.
+
+The problem: a plist whose StartCalendarInterval has Month and Day (launchd has no year) means
+"every year on that day". After the job runs, it stays loaded and runs again next year.
+
+Rule: a plist in ~/Library/LaunchAgents whose label starts with one of the prefixes, where EVERY
+StartCalendarInterval entry has Month and Day, with no StartInterval, and whose date this year
+passed more than 1 day ago (launchd runs a missed job when the Mac wakes up, so by then it has run),
+is reported and turned off: `launchctl bootout` + plist moved to ~/Library/LaunchAgents/overdue/
+(kept; to turn it back on, move it back and `launchctl bootstrap`).
+
+--dry-run   only report, change nothing
+--prefix    label prefix to check (repeatable). Default: $LAUNCHD_OVERDUE_PREFIX, else com.claude-agenda.
+
+Jobs that should repeat every year: put the label on a line of ~/.config/launchd-overdue/yearly.txt
+Log: ~/Library/Logs/launchd-overdue.log (or ~/.local/state/launchd-overdue/ off macOS)
+Exit code: 0, also when something was turned off.
+"""
+import datetime
+import glob
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+
+
+def home():
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def log(msg):
+    line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
+    print(line)
+    lib = os.path.join(home(), "Library", "Logs")
+    d = lib if sys.platform == "darwin" or os.path.isdir(lib) else os.path.join(home(), ".local", "state", "launchd-overdue")
+    try:
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "launchd-overdue.log"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def now():
+    v = os.environ.get("LAUNCHD_OVERDUE_NOW")  # tests: fixed "current" time, ISO format
+    return datetime.datetime.fromisoformat(v) if v else datetime.datetime.now()
+
+
+def launchctl():
+    v = os.environ.get("LAUNCHD_OVERDUE_LAUNCHCTL")
+    if v:
+        if v.endswith(".py"):
+            return [sys.executable, v]
+        v = v if os.path.exists(v) else shutil.which(v)
+        return [v] if v else None
+    w = shutil.which("launchctl")
+    return [w] if w else None
+
+
+def due_date(d, today):
+    """Date of a one-time job this year, or None if the plist is not a one-time job."""
+    cal = d.get("StartCalendarInterval")
+    cals = cal if isinstance(cal, list) else [cal] if isinstance(cal, dict) else []
+    if not cals or d.get("StartInterval") or not all(isinstance(c, dict) and "Month" in c and "Day" in c for c in cals):
+        return None
+    try:
+        return max(datetime.datetime(today.year, int(c["Month"]), int(c["Day"]), int(c.get("Hour", 0)), int(c.get("Minute", 0)))
+                   for c in cals)
+    except (ValueError, TypeError):
+        return None
+
+
+def main():
+    argv = sys.argv[1:]
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return 0
+    dry = "--dry-run" in argv
+    prefixes = [argv[i + 1] for i, a in enumerate(argv) if a == "--prefix" and i + 1 < len(argv)]
+    if not prefixes:
+        prefixes = [p for p in os.environ.get("LAUNCHD_OVERDUE_PREFIX", "com.claude-agenda.").split(",") if p]
+    la = os.path.join(home(), "Library", "LaunchAgents")
+    dest = os.path.join(la, "overdue")
+    yearly_file = os.path.join(home(), ".config", "launchd-overdue", "yearly.txt")
+    yearly = set()
+    if os.path.exists(yearly_file):
+        with open(yearly_file, encoding="utf-8") as f:
+            yearly = {l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")}
+    t = now()
+    lc = launchctl()
+    uid = getattr(os, "getuid", lambda: 0)()
+    files = sorted({f for p in prefixes for f in glob.glob(os.path.join(la, glob.escape(p) + "*.plist"))})
+    found = 0
+    for f in files:
+        try:
+            with open(f, "rb") as fh:
+                d = plistlib.load(fh)
+        except Exception as e:
+            log(f"could not read {os.path.basename(f)}: {e}")
+            continue
+        label = d.get("Label") or os.path.basename(f)[:-6]
+        if label.endswith("launchd-overdue") or label in yearly:
+            continue
+        when = due_date(d, t)
+        if when is None or t - when < datetime.timedelta(days=1):
+            continue   # not a one-time job, not yet due, or passed less than 1 day ago
+        found += 1
+        log(f"{'(dry-run) ' if dry else ''}overdue {label}: date {when:%m-%d %H:%M} has passed")
+        if dry:
+            continue
+        if lc:
+            subprocess.run(lc + ["bootout", f"gui/{uid}/{label}"], capture_output=True)
+        else:
+            log("launchctl not found: plist moved, but not unloaded")
+        os.makedirs(dest, exist_ok=True)
+        shutil.move(f, os.path.join(dest, os.path.basename(f)))
+    if not found:
+        print(f"no overdue one-time jobs ({', '.join(prefixes)})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
