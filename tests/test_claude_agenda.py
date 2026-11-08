@@ -517,8 +517,9 @@ def read_bytes(p):
 
 
 def strip_times(text):
-    """Log lines start with a timestamp; drop it so two runs can be compared."""
-    return "\n".join(l[20:] if l[:4].isdigit() else l for l in text.splitlines())
+    """Log lines start with a timestamp, and session names hold the time; drop both so two runs can be compared."""
+    import re
+    return re.sub(r"\d{6,}", "<time>", "\n".join(l[20:] if l[:4].isdigit() else l for l in text.splitlines()))
 
 
 class Seed(Base):
