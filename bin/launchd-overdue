@@ -89,7 +89,8 @@ def main():
         return 0
     dry = "--dry-run" in argv
     prefixes = [argv[i + 1] for i, a in enumerate(argv) if a == "--prefix" and i + 1 < len(argv)]
-    shared.seed()   # first run: create the config files that are missing (never changes existing ones)
+    if not dry:     # a dry run (like --help) writes nothing, not even the starter files
+        shared.seed()   # first run: create the config files that are missing (never changes existing ones)
     cfg = shared.load_config("launchd-overdue")
     if not prefixes and os.environ.get("LAUNCHD_OVERDUE_PREFIX"):
         prefixes = [p for p in os.environ["LAUNCHD_OVERDUE_PREFIX"].split(",") if p]

@@ -632,13 +632,17 @@ def main():
         print(__doc__)
         return 0
     cmds = {"run": cmd_run, "add": cmd_add, "list": cmd_list, "ls": cmd_list, "remove": cmd_remove, "rm": cmd_remove}
-    shared.seed()   # first run: create the config files that are missing (never changes existing ones)
+    # First real run: create the config files that are missing (never changes existing ones). --help,
+    # --dry-run and a mistyped command write nothing.
+    seed = (lambda: None) if "--dry-run" in argv else shared.seed
     if argv[0] not in cmds:
         near = near_command(argv[0], list(cmds) + ["help"])
         if not argv[0].startswith("-") and not near:
+            seed()
             return cmd_run(argv)  # short form: claude-agenda PREFIX PROMPT [...]
         hint = f" Did you mean '{near}'?" if near else ""
         sys.exit(f"claude-agenda: unknown command '{argv[0]}'.{hint} See: claude-agenda --help")
+    seed()
     return cmds[argv[0]](argv[1:])
 
 

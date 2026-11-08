@@ -550,9 +550,21 @@ class Seed(Base):
         self.assertTrue(os.path.isfile(self.yearly()))
 
     def test_launchd_overdue_seeds_too(self):
-        r = subprocess.run([PY, OVERDUE, "--dry-run"], capture_output=True, text=True, env=self.env)
+        # a real run in an empty fake HOME: no plists, so nothing to turn off
+        r = subprocess.run([PY, OVERDUE], capture_output=True, text=True,
+                           env=dict(self.env, LAUNCHD_OVERDUE_LAUNCHCTL=os.path.join(T, "fake_launchctl.py")))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assert_seeded(self.cfgdir())
+
+    def test_help_dry_run_and_typos_leave_a_missing_config_missing(self):
+        runs = [self.agenda("--help"), self.agenda("help"), self.agenda("lsit"),
+                self.agenda("add", "job", "--prefix", "J", "--prompt", "/x", "--at", "9:00", "--dry-run"),
+                self.agenda("run", "R", "hi", "--dry-run"), self.agenda("R", "hi", "--dry-run"),
+                self.agenda("remove", "job", "--dry-run"),
+                subprocess.run([PY, OVERDUE, "--dry-run"], capture_output=True, text=True, env=self.env),
+                subprocess.run([PY, OVERDUE, "--help"], capture_output=True, text=True, env=self.env)]
+        self.assertEqual(len(runs), 9)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config")), os.listdir(self.home))
 
     def test_existing_files_are_never_changed(self):
         os.makedirs(self.cfgdir())
