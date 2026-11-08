@@ -6,6 +6,7 @@ R="$(dirname "$T")"
 W="$(mktemp -d "${TMPDIR:-/tmp}/claude-agenda-test.XXXXXX")"
 trap 'rm -rf "$W"' EXIT
 PASS=0; FAIL=0
+unset XDG_CONFIG_HOME CLAUDE_CLOSE_SELF_ALLOW CLAUDE_CLOSE_SELF_ALLOW_FILE
 ok()  { echo "  PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 PY="$(command -v python3 || command -v python)"

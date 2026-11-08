@@ -32,7 +32,7 @@ class Base(unittest.TestCase):
         os.makedirs(self.work)
         self.la = os.path.join(self.home, "Library", "LaunchAgents")
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(("CLAUDE", "TMUX", "LAUNCHD_OVERDUE"))}
+                    if not k.startswith(("CLAUDE", "TMUX", "LAUNCHD_OVERDUE", "XDG_CONFIG_HOME"))}
         self.env.update(HOME=self.home, FAKE_DIR=self.t,
                         CLAUDE_AGENDA_LOG_DIR=os.path.join(self.t, "logs"),
                         CLAUDE_AGENDA_TMUX=os.path.join(T, "fake_tmux.py"),
