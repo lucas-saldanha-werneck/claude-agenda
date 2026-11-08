@@ -240,7 +240,8 @@ class Config(Base):
                                                    "--prefix=NIGHTLY", "rc="]])
         self.assertEqual([c for c in self.calls("tmux") if c[0] == "new-session"], [])
         self.assertIn("NIGHTLY: rc=0 launch_command=", r.stdout)
-        self.assertIn("launched", r.stdout)
+        with open(os.path.join(self.t, "logs", "claude-agenda-launch.log")) as f:
+            self.assertIn("launched", f.read(), "the launcher's output goes to claude-agenda-launch.log")
 
     def test_launch_command_still_closes_idle_and_respects_busy(self):
         self.config(launch_command=self.launcher("{name}"))
@@ -299,6 +300,115 @@ class Config(Base):
         r = self.agenda("list")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("not valid JSON", r.stderr)
+
+
+class ReviewFixes(Base):
+    """Regression tests for the review of the config options."""
+
+    def config(self, **cfg):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(cfg, f)
+
+    def launcher(self, *extra):
+        return [PY, os.path.join(T, "fake_launcher.py"), *extra]
+
+    def test_typo_of_a_subcommand_is_not_run(self):
+        self.tmux_state()
+        for typo in (["remov", "nightly"], ["lst", "x"], ["ad", "x"]):
+            r = self.agenda(*typo)
+            self.assertNotEqual(r.returncode, 0, typo)
+            self.assertIn("unknown command", r.stderr, typo)
+        self.assertEqual([c for c in self.calls("tmux") if c[0] == "new-session"], [])
+
+    def test_short_form_still_accepts_real_prefixes(self):
+        self.tmux_state()
+        for prefix in ("REPORT", "ZS ofertas", "weekly-check", "R"):
+            r = self.agenda(prefix, "hi", "--dir", self.work)
+            self.assertEqual(r.returncode, 0, prefix + r.stdout + r.stderr)
+        self.assertEqual(len([c for c in self.calls("tmux") if c[0] == "new-session"]), 4)
+
+    def test_idle_session_outside_tmux_default_logs_how_to_change(self):
+        self.tmux_state()
+        self.config(launch_command=self.launcher("{name}"), default_dir=self.work)
+        idle = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 999999}])
+        r = self.agenda("R", "hi", FAKE_AGENTS=idle)
+        self.assertIn("idle_outside_tmux", r.stdout)
+        self.assertEqual(self.calls("launcher"), [])
+
+    def test_idle_session_outside_tmux_open(self):
+        self.tmux_state()
+        self.config(launch_command=self.launcher("{name}"), default_dir=self.work, idle_outside_tmux="open")
+        idle = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 999999}])
+        r = self.agenda("R", "hi", FAKE_AGENTS=idle)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.calls("launcher")), 1)
+        busy = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "busy", "pid": 999999}])
+        self.agenda("R", "hi", FAKE_AGENTS=busy)
+        self.assertEqual(len(self.calls("launcher")), 1, "a busy previous session still skips the run")
+
+    def test_idle_session_outside_tmux_close_command(self):
+        self.tmux_state()
+        closer = os.path.join(self.t, "closed.txt")
+        self.config(launch_command=self.launcher("{name}"), default_dir=self.work, idle_outside_tmux="close",
+                    close_command=[PY, "-c", "import sys; open(sys.argv[1], 'w').write(sys.argv[2])", closer, "{pid}"])
+        idle = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 999999}])
+        r = self.agenda("R", "hi", FAKE_AGENTS=idle)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(closer) as f:
+            self.assertEqual(f.read(), "999999")
+        self.assertEqual(len(self.calls("launcher")), 1)
+
+    def test_bad_idle_outside_tmux_value(self):
+        self.config(idle_outside_tmux="maybe")
+        r = self.agenda("R", "hi", "--dir", self.work)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("idle_outside_tmux", r.stdout + r.stderr)
+
+    def test_launcher_that_backgrounds_does_not_hang(self):
+        self.tmux_state()
+        self.config(launch_command=[PY, os.path.join(T, "fake_bg_launcher.py")], default_dir=self.work)
+        t0 = time.time()
+        r = self.agenda("R", "hi")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(time.time() - t0, 10, "run must not wait for the launcher's background child")
+        with open(os.path.join(self.t, "logs", "claude-agenda-launch.log")) as f:
+            self.assertIn("started in background", f.read())
+
+    def test_launch_command_does_not_need_tmux(self):
+        self.config(launch_command=self.launcher("{name}"), default_dir=self.work)
+        r = self.agenda("R", "hi", CLAUDE_AGENDA_TMUX=os.path.join(self.t, "nope"), PATH="")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.calls("launcher")), 1)
+
+    def test_dir_aliases_must_be_a_list_of_flags(self):
+        for bad in ("--folder", ["folder"], [1]):
+            self.config(dir_aliases=bad)
+            r = self.agenda("R", "hi", "--dir", self.work)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("dir_aliases", r.stderr, bad)
+
+    def test_launch_command_with_dir_needs_a_folder(self):
+        self.tmux_state()
+        self.config(launch_command=self.launcher("{dir}"))
+        r = self.agenda("R", "hi")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("default_dir", r.stdout + r.stderr)
+        self.assertEqual(self.calls("launcher"), [])
+        self.config(launch_command=self.launcher("{name}"))
+        self.assertEqual(self.agenda("R", "hi").returncode, 0, "a launcher that ignores the folder needs none")
+
+    def test_config_must_be_an_object_in_both_tools(self):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            f.write("[1, 2]")
+        r1 = self.agenda("list")
+        r2 = subprocess.run([PY, OVERDUE, "--dry-run"], capture_output=True, text=True, env=self.env)
+        for r in (r1, r2):
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("must hold a JSON object", r.stderr)
 
 
 class Overdue(Base):
@@ -371,6 +481,23 @@ class Overdue(Base):
         self.write_config(label_prefix="org.other.")
         self.run_overdue()
         self.assertNotIn("org.other.past.plist", self.left())
+
+    def test_overdue_prefixes_must_be_a_list_of_prefixes(self):
+        self.write("com.apple.past", {"Month": 1, "Day": 1})
+        for bad in ("com.", ["com"], [""], [5]):
+            self.write_config(overdue_prefixes=bad)
+            r = self.run_overdue()
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("overdue_prefixes", r.stdout + r.stderr, bad)
+        self.assertIn("com.apple.past.plist", self.left())
+        self.assertIn("com.claude-agenda.past.plist", self.left())
+
+    def test_label_prefix_without_dot_is_normalized(self):
+        self.write("org.otherx.past", {"Month": 1, "Day": 1})
+        self.write_config(label_prefix="org.other")
+        self.run_overdue()
+        self.assertNotIn("org.other.past.plist", self.left())
+        self.assertIn("org.otherx.past.plist", self.left(), "org.other means org.other. as in claude-agenda")
 
     def test_env_overrides_config(self):
         self.write_config(overdue_prefixes=["org.other."])

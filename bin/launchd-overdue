@@ -26,16 +26,18 @@ Exit code: 0, also when something was turned off.
 """
 import datetime
 import glob
-import json
 import os
 import plistlib
 import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import claude_agenda_config as shared  # noqa: E402  (installed next to this script)
+
 
 def home():
-    return os.environ.get("HOME") or os.path.expanduser("~")
+    return shared.home()
 
 
 def log(msg):
@@ -49,19 +51,6 @@ def log(msg):
             f.write(line + "\n")
     except OSError:
         pass
-
-
-def config():
-    path = os.environ.get("CLAUDE_AGENDA_CONFIG") or os.path.join(
-        os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config"), "claude-agenda", "config.json")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            c = json.load(f)
-    except Exception as e:
-        sys.exit(f"launchd-overdue: config file {path} is not valid JSON: {e}")
-    return c if isinstance(c, dict) else {}
 
 
 def now():
@@ -100,11 +89,17 @@ def main():
         return 0
     dry = "--dry-run" in argv
     prefixes = [argv[i + 1] for i, a in enumerate(argv) if a == "--prefix" and i + 1 < len(argv)]
-    cfg = config()
+    cfg = shared.load_config("launchd-overdue")
     if not prefixes and os.environ.get("LAUNCHD_OVERDUE_PREFIX"):
         prefixes = [p for p in os.environ["LAUNCHD_OVERDUE_PREFIX"].split(",") if p]
     if not prefixes:
-        prefixes = list(cfg.get("overdue_prefixes") or [cfg.get("label_prefix") or "com.claude-agenda."])
+        v = cfg.get("overdue_prefixes")
+        if v is not None and (not isinstance(v, list) or not v or
+                              not all(isinstance(x, str) and len(x) > 1 and x.endswith(".") for x in v)):
+            log(f"error: overdue_prefixes in {shared.config_path()} must be a non-empty list of label prefixes "
+                f"ending in '.', such as [\"com.example.\"]; got {v!r}. Nothing was checked.")
+            return 2
+        prefixes = list(v or [shared.normalize_prefix(cfg.get("label_prefix"))])
     la = os.path.join(home(), "Library", "LaunchAgents")
     dest = os.path.expanduser(os.environ.get("LAUNCHD_OVERDUE_MOVE_TO") or cfg.get("overdue_dir")
                               or os.path.join(la, "overdue"))

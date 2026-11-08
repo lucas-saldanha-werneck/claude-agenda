@@ -55,6 +55,17 @@ P="$H/Library/LaunchAgents/org.example.agenda.launchd-overdue.plist"
 grep -q "$H" "$P" && ! grep -q '\$HOME' "$P" && ok "home path expanded in plist" || bad "home not expanded"
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$P" >/dev/null && ok "plutil -lint" || bad "plutil -lint failed"; fi
 [ ! -f "$W/launchctl-calls" ] && echo "$OUT" | grep -q "not loaded" && ok "nothing loaded without --load" || bad "launchctl called: $(cat "$W/launchctl-calls" 2>&1)"
+H2="$W/home2"; mkdir -p "$H2"
+OUT=$(HOME="$H2" INSTALL_OS=Darwin bash "$R/install.sh")
+P2="$H2/Library/LaunchAgents/com.claude-agenda.launchd-overdue.plist"
+[ -f "$P2" ] && "$PY" -c "import plistlib,sys;a=plistlib.load(open(sys.argv[1],'rb'))['ProgramArguments'];assert '--prefix' not in a,a" "$P2" \
+  && ok "no --prefix given: the overdue job follows the config file" || bad "plist: $(cat "$P2" 2>&1)"
+[ -f "$H2/.local/bin/claude_agenda_config.py" ] && ok "shared module installed next to the tools" || bad "$OUT"
+mkdir -p "$H2/.config/claude-agenda"; echo '{"overdue_prefixes": ["org.cfg."]}' > "$H2/.config/claude-agenda/config.json"
+OUT=$(cd / && HOME="$H2" "$PY" "$H2/.local/bin/launchd-overdue" --dry-run 2>&1)
+echo "$OUT" | grep -q "org.cfg." && ok "installed launchd-overdue runs and reads the config" || bad "$OUT"
+OUT=$(cd / && HOME="$H2" "$PY" "$H2/.local/bin/claude-agenda" list 2>&1)
+echo "$OUT" | grep -q "com.claude-agenda.launchd-overdue" && ok "installed claude-agenda runs" || bad "$OUT"
 OUT=$(HOME="$H" INSTALL_OS=Darwin bash "$R/install.sh" --prefix org.example.agenda --load)
 grep -q "^bootstrap gui/" "$W/launchctl-calls" 2>/dev/null && ok "--load calls (fake) launchctl bootstrap" || bad "$OUT"
 OUT=$(HOME="$H" INSTALL_OS=Linux bash "$R/install.sh" --prefix org.other)
