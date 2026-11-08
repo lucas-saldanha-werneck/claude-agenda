@@ -45,4 +45,13 @@ Steps:
 - `claude-agenda run PREFIX "PROMPT" --dir DIR --dry-run` - shows what a run would do, opens nothing.
 - `launchd-overdue --dry-run` - lists one-time jobs whose date has passed.
 
+## Settings
+
+The user's settings are in `~/.config/claude-agenda/config.json` (label prefix, default folder, their
+own `launch_command`, the yearly-jobs file, ...) and `~/.config/claude-agenda/close-self-allow` (extra
+tmux session names `claude-close-self` may close). Both are outside the plugin, so they survive updates.
+Read them before creating a job if they exist: the label prefix there is the one `add` uses, and with a
+`launch_command` the session is opened by the user's launcher, not by tmux directly. The README lists every
+key. `claude-agenda PREFIX "PROMPT"` (no `run`) is accepted too, for jobs written by hand.
+
 Logs: `~/Library/Logs/claude-agenda.log` (each run), `~/Library/Logs/claude-agenda.out` (launchd output).

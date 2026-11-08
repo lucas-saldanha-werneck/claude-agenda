@@ -1,0 +1,5 @@
+# launchd-overdue yearly list: one launchd label per line. A dated job listed here repeats every year,
+# so launchd-overdue never turns it off. Blank lines and # lines are ignored.
+# Empty (the default): every dated job is turned off one day after its date.
+#
+# com.claude-agenda.birthday-reminder

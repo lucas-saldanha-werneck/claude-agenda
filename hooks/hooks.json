@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          { "type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/bin/claude_agenda_config.py", "--seed"], "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

@@ -4,7 +4,11 @@
 # (default 30), so the final answer reaches the app / Remote Control before the session goes away.
 #
 # Safety: it only acts on tmux sessions whose name starts with "claude-agenda-" (the names
-# claude-agenda gives them), or matches the extended regex in CLAUDE_CLOSE_SELF_ALLOW.
+# claude-agenda gives them), or matches an extended regex from your allow-list:
+#   - one regex per line in ~/.config/claude-agenda/close-self-allow (or $CLAUDE_CLOSE_SELF_ALLOW_FILE);
+#     blank lines and lines starting with # are ignored. The file is outside the plugin, so it
+#     survives plugin updates. Use it when sessions are opened by your own launch_command.
+#   - or the regex in $CLAUDE_CLOSE_SELF_ALLOW.
 # Any other session (your normal work) is left alone. Outside tmux it does nothing.
 delay=${1:-30}
 case "$delay" in ''|*[!0-9]*) echo "claude-close-self: seconds must be a number" >&2; exit 2 ;; esac
@@ -19,6 +23,13 @@ case "$sess" in claude-agenda-*) allowed=yes ;; esac
 if [ "$allowed" = no ] && [ -n "${CLAUDE_CLOSE_SELF_ALLOW:-}" ] \
    && printf '%s\n' "$sess" | grep -Eq -- "$CLAUDE_CLOSE_SELF_ALLOW"; then
   allowed=yes
+fi
+ALLOW_FILE=${CLAUDE_CLOSE_SELF_ALLOW_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-agenda/close-self-allow}
+if [ "$allowed" = no ] && [ -f "$ALLOW_FILE" ]; then
+  while IFS= read -r pat || [ -n "$pat" ]; do
+    case "$pat" in ''|'#'*) continue ;; esac
+    if printf '%s\n' "$sess" | grep -Eq -- "$pat"; then allowed=yes; break; fi
+  done < "$ALLOW_FILE"
 fi
 if [ "$allowed" = no ]; then
   echo "claude-close-self: session '$sess' was not opened by claude-agenda - not closing it"

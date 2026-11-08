@@ -8,6 +8,7 @@ Usage:
   claude-agenda list
   claude-agenda remove NAME [--dry-run]
   claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]
+  claude-agenda PREFIX PROMPT [...]      same as `run` (short form, for jobs written by hand)
 
 `add` writes a launchd job (~/Library/LaunchAgents/<label-prefix><NAME>.plist) that calls
 `claude-agenda run` at the given times. It loads the job only with --load.
@@ -24,6 +25,10 @@ still working -> this run is skipped.
 --date makes a one-time job. launchd has no year, so the job would repeat every year on that day;
 `launchd-overdue` (installed next to this script) disables it once the date has passed.
 
+Config file: ~/.config/claude-agenda/config.json (or $CLAUDE_AGENDA_CONFIG). It lives outside the plugin,
+so it survives plugin updates. Keys: label_prefix, claude, tmux, log_dir, stale_hours, default_dir,
+dir_aliases, launch_command (see README). An environment variable wins over the same key in the file.
+
 Environment:
   CLAUDE_AGENDA_LABEL_PREFIX  launchd label prefix (default com.claude-agenda.)
   CLAUDE_AGENDA_CLAUDE        claude binary (default: the stable copy from stable-sync if present,
@@ -35,26 +40,52 @@ Environment:
                               hours (default 12)
 """
 import datetime
+import difflib
 import json
 import os
 import plistlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import claude_agenda_config as shared  # noqa: E402  (installed next to this script)
 
 TMUX_PREFIX = "claude-agenda-"   # claude-close-self only acts on tmux sessions with this prefix
 WEEKDAYS = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
 
 
 def home():
-    return os.environ.get("HOME") or os.path.expanduser("~")
+    return shared.home()
+
+
+_CONFIG = None
+
+
+def config():
+    """~/.config/claude-agenda/config.json (or $CLAUDE_AGENDA_CONFIG); {} when absent."""
+    global _CONFIG
+    if _CONFIG is None:
+        _CONFIG = shared.load_config("claude-agenda")
+    return _CONFIG
+
+
+IDLE_OUTSIDE_TMUX = ("skip", "open", "close")
+
+
+def setting(key, env=None, default=None):
+    """Environment variable, else config key, else default."""
+    if env and os.environ.get(env):
+        return os.environ[env]
+    v = config().get(key)
+    return default if v is None or v == "" else v
 
 
 def label_prefix(override=None):
-    p = override or os.environ.get("CLAUDE_AGENDA_LABEL_PREFIX") or "com.claude-agenda."
-    return p if p.endswith(".") else p + "."
+    return shared.normalize_prefix(override or setting("label_prefix", "CLAUDE_AGENDA_LABEL_PREFIX"))
 
 
 def agents_dir():
@@ -62,8 +93,10 @@ def agents_dir():
 
 
 def log_dir():
-    d = os.environ.get("CLAUDE_AGENDA_LOG_DIR")
-    if not d:
+    d = setting("log_dir", "CLAUDE_AGENDA_LOG_DIR")
+    if d:
+        d = os.path.expanduser(d)
+    else:
         lib = os.path.join(home(), "Library", "Logs")
         d = lib if sys.platform == "darwin" or os.path.isdir(lib) else \
             os.path.join(home(), ".local", "state", "claude-agenda")
@@ -81,10 +114,11 @@ def log(msg):
         pass
 
 
-def tool(env_name, *defaults):
+def tool(env_name, *defaults, key=None):
     """Command list for a tool. An override ending in .py runs with this Python (used by tests)."""
-    v = os.environ.get(env_name)
+    v = setting(key, env_name) if key else os.environ.get(env_name)
     if v:
+        v = os.path.expanduser(v)
         if v.endswith(".py"):
             return [sys.executable, v]
         found = v if os.path.exists(v) else shutil.which(v)
@@ -100,11 +134,11 @@ def tool(env_name, *defaults):
 
 def claude_cmd():
     stable = os.path.join(home(), ".local", "libexec", "claude-stable", "claude")
-    return tool("CLAUDE_AGENDA_CLAUDE", stable, "claude")
+    return tool("CLAUDE_AGENDA_CLAUDE", stable, "claude", key="claude")
 
 
 def tmux_cmd():
-    return tool("CLAUDE_AGENDA_TMUX", "tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux")
+    return tool("CLAUDE_AGENDA_TMUX", "tmux", "/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", key="tmux")
 
 
 def launchctl_cmd():
@@ -208,13 +242,86 @@ def login_shell():
     return "sh"
 
 
+def launch_command():
+    """launch_command from the config: a list of strings, or None for the built-in tmux launch."""
+    v = config().get("launch_command")
+    if not v:
+        return None
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        sys.exit("claude-agenda: launch_command must be a list of strings")
+    return v
+
+
+def fill_launch(template, values):
+    out = []
+    for i, x in enumerate(template):
+        try:
+            x = x.format(**values)
+        except (KeyError, IndexError, ValueError) as e:
+            sys.exit(f"claude-agenda: launch_command item {x!r} is invalid ({e}); "
+                     f"placeholders: {', '.join('{' + k + '}' for k in values)}")
+        out.append(os.path.expanduser(x) if i == 0 else x)
+    return out
+
+
+def close_idle(prefix, agent, close_cmd):
+    """Close an idle session that is not in tmux: close_command if set, else SIGTERM to its process."""
+    pid = agent.get("pid")
+    if close_cmd:
+        cmd = fill_launch(close_cmd, {"pid": str(pid), "name": str(agent.get("name", "")), "prefix": prefix})
+        try:
+            r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+            log(f"{prefix}: close_command rc={r.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            log(f"{prefix}: close_command failed ({e})")
+        return
+    try:
+        os.kill(int(pid), getattr(signal, "SIGTERM", 15))
+    except (OSError, TypeError, ValueError) as e:
+        log(f"{prefix}: could not stop pid {pid} ({e})")
+
+
+def run_launcher(prefix, cmd, folder, timeout=180):
+    """Start launch_command with its output in claude-agenda-launch.log (no pipes: a launcher that leaves a
+    background process holding them would make us wait), in its own session, and wait for its exit code."""
+    out_path = os.path.join(log_dir(), "claude-agenda-launch.log")
+    try:
+        with open(out_path, "a", encoding="utf-8") as out:
+            out.write(f"--- {datetime.datetime.now():%Y-%m-%d %H:%M:%S} {prefix}: "
+                      f"{' '.join(shlex.quote(c) for c in cmd)}\n")
+            out.flush()
+            kw = {"start_new_session": True} if os.name == "posix" else {}
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                    cwd=folder if os.path.isdir(folder) else None, **kw)
+    except OSError as e:
+        log(f"{prefix}: error - launch_command failed to run ({e})")
+        return 1
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"{prefix}: launch_command still running after {timeout}s; left running (output in {out_path})")
+        return 0
+    log(f"{prefix}: rc={rc} launch_command={os.path.basename(cmd[0])} (output in {out_path})")
+    return rc
+
+
 def cmd_run(argv):
-    folder, rc_flag, dry = os.getcwd(), False, False
+    custom = launch_command()
+    folder, rc_flag, dry = setting("default_dir", default=None), False, False
+    dir_flags = ["--dir"] + shared.string_list(config(), "dir_aliases", "claude-agenda",
+                                               lambda x: x.startswith("-"), " starting with '-'")
+    idle_mode = config().get("idle_outside_tmux", "skip")
+    if idle_mode not in IDLE_OUTSIDE_TMUX:
+        sys.exit(f"claude-agenda: idle_outside_tmux must be one of {', '.join(IDLE_OUTSIDE_TMUX)}; got {idle_mode!r}")
+    close_cmd = config().get("close_command")
+    if close_cmd is not None and (not isinstance(close_cmd, list) or not close_cmd
+                                  or not all(isinstance(x, str) for x in close_cmd)):
+        sys.exit("claude-agenda: close_command must be a list of strings")
     rest = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--dir" and i + 1 < len(argv):
+        if a in dir_flags and i + 1 < len(argv):
             folder = argv[i + 1]
             i += 2
             continue
@@ -228,21 +335,27 @@ def cmd_run(argv):
     if len(rest) != 2:
         sys.exit("usage: claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]")
     prefix, prompt = rest[0].strip(), rest[1]
-    folder = os.path.abspath(os.path.expanduser(folder))
-    if not os.path.isdir(folder):
+    if custom and folder is None and any("{dir" in x for x in custom):
+        log(f"{prefix}: error - launch_command uses {{dir}} but the job gives no --dir and the config has no "
+            f"default_dir (launchd would start it in {os.getcwd()})")
+        return 1
+    raw_folder = folder if folder is not None else os.getcwd()
+    folder = os.path.abspath(os.path.expanduser(raw_folder))
+    if not custom and not os.path.isdir(folder):
+        # with a launch_command the folder is passed as given: the launcher may resolve it itself
         log(f"{prefix}: error - folder not found: {folder}")
         return 1
     tm = tmux_cmd()
-    if not tm:
+    if not tm and not custom:
         log(f"{prefix}: error - tmux not found. Install it (brew install tmux) or set CLAUDE_AGENDA_TMUX.")
         return 1
     claude = claude_cmd()
-    if not claude:
+    if not claude and not custom:
         log(f"{prefix}: error - claude not found. Install Claude Code or set CLAUDE_AGENDA_CLAUDE.")
         return 1
     name = f"{prefix} {datetime.datetime.now():%d-%m}"
     mine = TMUX_PREFIX + safe(prefix) + "-"
-    sessions = tmux_sessions(tm)
+    sessions = tmux_sessions(tm) if tm else {}
     handled = set()
 
     # 1) sessions Claude itself knows about (status idle/busy)
@@ -252,10 +365,20 @@ def cmd_run(argv):
         if a.get("status") == "busy":
             log(f"{prefix}: skipped - '{a['name']}' is still working (pid {a.get('pid')})")
             return 0
-        sess = tmux_session_of(tm, a.get("pid"))
+        sess = tmux_session_of(tm, a.get("pid")) if tm else None
         if not sess:
-            log(f"{prefix}: skipped - '{a['name']}' is open outside tmux (pid {a.get('pid')}); not closing it")
-            return 0
+            where = f"'{a['name']}' is idle outside tmux (pid {a.get('pid')})"
+            if idle_mode == "skip":
+                log(f"{prefix}: skipped - {where}; not closing it. Every run is skipped until it is closed: "
+                    f"set idle_outside_tmux to \"open\" or \"close\" in the config to change this")
+                return 0
+            if idle_mode == "open":
+                log(f"{prefix}: {where}; opening a new session beside it (idle_outside_tmux=open)")
+                continue
+            log(f"{prefix}: closing {where} (idle_outside_tmux=close)")
+            if not dry:
+                close_idle(prefix, a, close_cmd)
+            continue
         log(f"{prefix}: closing idle session '{a['name']}' (tmux {sess})")
         handled.add(sess)
         if not dry:
@@ -263,8 +386,8 @@ def cmd_run(argv):
 
     # 2) our tmux sessions with unknown status: close only when older than the stale limit
     try:
-        stale_h = float(os.environ.get("CLAUDE_AGENDA_STALE_HOURS", "12"))
-    except ValueError:
+        stale_h = float(setting("stale_hours", "CLAUDE_AGENDA_STALE_HOURS", 12))
+    except (TypeError, ValueError):
         stale_h = 12.0
     now = datetime.datetime.now().timestamp()
     for sess, created in sessions.items():
@@ -278,6 +401,14 @@ def cmd_run(argv):
         log(f"{prefix}: closing stale tmux session '{sess}' ({age_h:.1f} h old)")
         if not dry:
             subprocess.run(tm + ["kill-session", "-t", sess], capture_output=True)
+
+    if custom:
+        cmd = fill_launch(custom, {"prefix": prefix, "name": name, "prompt": prompt, "dir": raw_folder,
+                                   "dir_abs": folder, "remote_control": "1" if rc_flag else ""})
+        if dry:
+            log(f"{prefix}: (dry-run) would run: {' '.join(shlex.quote(c) for c in cmd)}")
+            return 0
+        return run_launcher(prefix, cmd, folder)
 
     tsess = f"{mine}{int(now)}"
     inner = tmux_inner(claude, name, prompt, rc_flag)
@@ -483,14 +614,35 @@ def cmd_remove(argv):
     return 0
 
 
+def near_command(word, commands):
+    """A subcommand the word looks like a typo of. Only lower-case words count: a session PREFIX in capitals
+    (REPORT, R) is never mistaken for one; a lower-case prefix must not look like a command."""
+    if not word.isalpha() or not word.islower():
+        return None
+    for c in commands:
+        if len(word) >= 2 and c.startswith(word):
+            return c
+    m = difflib.get_close_matches(word, commands, n=1, cutoff=0.75)
+    return m[0] if m else None
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
     cmds = {"run": cmd_run, "add": cmd_add, "list": cmd_list, "ls": cmd_list, "remove": cmd_remove, "rm": cmd_remove}
+    # First real run: create the config files that are missing (never changes existing ones). --help,
+    # --dry-run and a mistyped command write nothing.
+    seed = (lambda: None) if "--dry-run" in argv else shared.seed
     if argv[0] not in cmds:
-        sys.exit(f"claude-agenda: unknown command '{argv[0]}'. See: claude-agenda --help")
+        near = near_command(argv[0], list(cmds) + ["help"])
+        if not argv[0].startswith("-") and not near:
+            seed()
+            return cmd_run(argv)  # short form: claude-agenda PREFIX PROMPT [...]
+        hint = f" Did you mean '{near}'?" if near else ""
+        sys.exit(f"claude-agenda: unknown command '{argv[0]}'.{hint} See: claude-agenda --help")
+    seed()
     return cmds[argv[0]](argv[1:])
 
 

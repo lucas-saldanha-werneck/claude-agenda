@@ -3,6 +3,7 @@
 # the daily launchd job for launchd-overdue (with your real paths). Loads nothing unless --load.
 #
 #   ./install.sh [--dry-run] [--load] [--no-overdue-job] [--prefix com.claude-agenda.]
+#   --prefix also fixes the prefix the overdue job checks; without it the job follows the config file.
 #   ./install.sh --uninstall [--dry-run]
 #
 # Environment: INSTALL_BIN_DIR (default ~/.local/bin).
@@ -11,9 +12,12 @@ R="$(cd "$(dirname "$0")" && pwd)"
 BIN="${INSTALL_BIN_DIR:-$HOME/.local/bin}"
 LA="$HOME/Library/LaunchAgents"
 PREFIX="${CLAUDE_AGENDA_LABEL_PREFIX:-com.claude-agenda.}"
+PREFIX_GIVEN=0; [ -n "${CLAUDE_AGENDA_LABEL_PREFIX:-}" ] && PREFIX_GIVEN=1
 OS="${INSTALL_OS:-$(uname -s)}"   # INSTALL_OS: test hook
 DRY=0; LOAD=0; UNINSTALL=0; JOB=1
 TOOLS="claude-agenda claude-close-self launchd-overdue"
+LIBS="claude_agenda_config.py"   # shared module the Python tools import from their own folder
+STARTERS="config.example.json close-self-allow.example yearly.example.txt"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -21,7 +25,7 @@ while [ $# -gt 0 ]; do
     --load) LOAD=1 ;;
     --uninstall) UNINSTALL=1 ;;
     --no-overdue-job) JOB=0 ;;
-    --prefix) PREFIX="$2"; shift ;;
+    --prefix) PREFIX="$2"; PREFIX_GIVEN=1; shift ;;
     -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
   esac
@@ -36,8 +40,11 @@ run() { if [ $DRY = 1 ]; then echo "(dry-run) $*"; else "$@"; fi; }
 have_launchctl() { [ "$OS" = Darwin ] && command -v launchctl >/dev/null 2>&1; }
 
 if [ $UNINSTALL = 1 ]; then
-  for t in $TOOLS; do
+  for t in $TOOLS $LIBS; do
     [ -e "$BIN/$t" ] && run rm -f "$BIN/$t" && echo "removed $BIN/$t"
+  done
+  for t in $STARTERS; do
+    [ -e "$BIN/claude-agenda.$t" ] && run rm -f "$BIN/claude-agenda.$t" && echo "removed $BIN/claude-agenda.$t"
   done
   if [ -f "$PLIST" ]; then
     have_launchctl && run launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
@@ -60,6 +67,12 @@ run mkdir -p "$BIN"
 for t in $TOOLS; do
   run cp "$R/bin/$t" "$BIN/$t" && run chmod 755 "$BIN/$t" && echo "installed $BIN/$t"
 done
+for t in $LIBS; do
+  run cp "$R/bin/$t" "$BIN/$t" && run chmod 644 "$BIN/$t" && echo "installed $BIN/$t"
+done
+for t in $STARTERS; do   # starter config files: the tools copy them to ~/.config on first run
+  run cp "$R/$t" "$BIN/claude-agenda.$t" && run chmod 644 "$BIN/claude-agenda.$t" && echo "installed $BIN/claude-agenda.$t"
+done
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: $BIN is not on your PATH" ;; esac
 
 if [ $JOB = 0 ]; then exit 0; fi
@@ -67,6 +80,12 @@ if [ "$OS" != Darwin ]; then
   echo "launchd is macOS-only: skipped the daily launchd-overdue job"
   exit 0
 fi
+# --prefix goes into the job only when you gave one; otherwise launchd-overdue reads overdue_prefixes /
+# label_prefix from ~/.config/claude-agenda/config.json on every run.
+PREFIX_ARGS=""
+[ $PREFIX_GIVEN = 1 ] && PREFIX_ARGS="
+		<string>--prefix</string>
+		<string>$PREFIX</string>"
 XML="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
@@ -76,9 +95,7 @@ XML="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 	<key>ProgramArguments</key>
 	<array>
 		<string>$PY</string>
-		<string>$BIN/launchd-overdue</string>
-		<string>--prefix</string>
-		<string>$PREFIX</string>
+		<string>$BIN/launchd-overdue</string>$PREFIX_ARGS
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>
