@@ -42,8 +42,8 @@ One-time job: `--date 2026-12-24 --at 10:00`. `launchd-overdue` moves it to
 ## Install
 
 ```
-git clone https://github.com/lucas-saldanha-werneck/claude-agenda
-cd claude-agenda
+git clone https://github.com/lucas-saldanha-werneck/launchd-agenda
+cd launchd-agenda
 ./install.sh            # copies the 3 tools (and their shared module) to ~/.local/bin and writes the daily launchd-overdue job
 ./install.sh --load     # same, and loads that job
 ./install.sh --dry-run  # shows what it would do
@@ -56,30 +56,29 @@ loaded only with `--load` too.
 The plugin adds a skill so you can just ask Claude ("run /weekly-report every Monday at 9"):
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-agenda
-/plugin install launchd-agenda@launchd-agenda
+/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin install launchd-agenda@lucas-plugins
 ```
 
 The plugin is called `launchd-agenda` because Claude Code reserves plugin names that start with `claude-`. The skill uses the `claude-agenda` installed by `install.sh`, so run that too.
 
 Requires `python3` 3.8+, `tmux` and Claude Code (`claude`).
 
-## Your settings
-
-Your settings are in `~/.config/claude-agenda/config.json` (or `$CLAUDE_AGENDA_CONFIG`; `$XDG_CONFIG_HOME` is
-respected). You do not have to create it: the first time the plugin starts a session, or `claude-agenda` or
-`launchd-overdue` really runs (`--help` and `--dry-run` write nothing), it is created with every option at its default (the same behavior as no file), next to
-`close-self-allow` and `~/.config/launchd-overdue/yearly.txt` (comments only). A file that already exists is
-never changed, and plugin updates or a new `install.sh` never touch these files. Starters:
-[`config.example.json`](config.example.json), [`close-self-allow.example`](close-self-allow.example),
-[`yearly.example.txt`](yearly.example.txt).
-
 ## Settings
 
-Settings live in `~/.config/claude-agenda/config.json` (or `$CLAUDE_AGENDA_CONFIG`). **They survive plugin
-updates:** the file is outside the plugin folder, and `/plugin update` or a new `install.sh` never touches
-it. launchd reads it on every run, so a change applies from the next run. An environment variable wins over
-the same setting in the file.
+Settings live in `~/.config/claude-agenda/config.json` (or `$CLAUDE_AGENDA_CONFIG`; `$XDG_CONFIG_HOME` is
+respected).
+
+You do not have to create it: the first time the plugin starts a session, or `claude-agenda` or
+`launchd-overdue` really runs (`--help` and `--dry-run` write nothing), it is created with every option at
+its default (the same behavior as no file), next to `close-self-allow` and
+`~/.config/launchd-overdue/yearly.txt` (comments only). A file that already exists is never changed.
+
+**They survive plugin updates:** the files are outside the plugin folder, and `/plugin update` or a new
+`install.sh` never touches them. launchd reads the config on every run, so a change applies from the next
+run. An environment variable wins over the same setting in the file. Starters:
+[`config.example.json`](config.example.json), [`close-self-allow.example`](close-self-allow.example),
+[`yearly.example.txt`](yearly.example.txt).
 
 | Config key | Environment variable | Default | What it does |
 |---|---|---|---|
