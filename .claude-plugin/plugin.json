@@ -1,13 +1,13 @@
 {
   "name": "launchd-agenda",
-  "version": "0.2.0",
-  "description": "Schedule Claude Code sessions on your Mac with launchd, so they run locally with your skills, hooks and files; close each session when done and turn off one-time jobs once their date has passed.",
+  "version": "0.2.1",
+  "description": "Schedules Claude Code sessions on your Mac with launchd, with your local skills and hooks.",
   "author": {
     "name": "Lucas Saldanha Werneck",
     "url": "https://github.com/lucas-saldanha-werneck"
   },
-  "homepage": "https://github.com/lucas-saldanha-werneck/claude-agenda",
-  "repository": "https://github.com/lucas-saldanha-werneck/claude-agenda",
+  "homepage": "https://github.com/lucas-saldanha-werneck/launchd-agenda",
+  "repository": "https://github.com/lucas-saldanha-werneck/launchd-agenda",
   "license": "MIT",
   "keywords": ["macos", "launchd", "schedule", "cron", "tmux", "automation"]
 }
