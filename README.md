@@ -57,7 +57,7 @@ The plugin adds a skill so you can just ask Claude ("run /weekly-report every Mo
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-plugins
-/plugin install launchd-agenda@lucas-plugins
+/plugin install launchd-agenda@lucas-tools
 ```
 
 The plugin is called `launchd-agenda` because Claude Code reserves plugin names that start with `claude-`. The skill uses the `claude-agenda` installed by `install.sh`, so run that too.
