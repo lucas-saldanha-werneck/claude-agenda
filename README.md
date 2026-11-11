@@ -56,7 +56,7 @@ loaded only with `--load` too.
 The plugin adds a skill so you can just ask Claude ("run /weekly-report every Monday at 9"):
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin marketplace add lucas-saldanha-werneck/lucas-tools
 /plugin install launchd-agenda@lucas-tools
 ```
 
