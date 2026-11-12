@@ -1,6 +1,6 @@
 {
   "name": "launchd-agenda",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Schedules Claude Code sessions on your Mac with launchd, with your local skills and hooks.",
   "author": {
     "name": "Lucas Saldanha Werneck",

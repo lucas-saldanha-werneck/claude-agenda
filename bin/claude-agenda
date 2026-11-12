@@ -628,6 +628,28 @@ def take(argv, flag, multi=False, has_value=True):
     return vals[-1] if vals else None
 
 
+def resolve_add_dir(raw):
+    """--dir for `add`: a path that exists (against the cwd, absolute, or ~) is stored absolute, as before.
+    A bare name that does not exist here is kept as given when the launcher resolves names itself (claude-open,
+    or launch_resolves_dir=true in the config), because `run` passes it through to that launcher."""
+    folder = os.path.abspath(os.path.expanduser(raw))
+    if os.path.isdir(folder):
+        return folder
+    custom = launch_command()
+    resolves = bool(custom) and (os.path.basename(custom[0]) == "claude-open" or config().get("launch_resolves_dir") is True)
+    if resolves and raw and not raw.startswith(("/", ".", "~")):
+        if os.path.basename(custom[0]) == "claude-open":   # --dry-run resolves the name and opens nothing
+            r = subprocess.run([os.path.expanduser(custom[0]), raw, "--dry-run"], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL)
+            if r.returncode != 0:
+                sys.exit(f"claude-agenda: folder not found: {raw} (claude-open cannot resolve it either: "
+                         f"{((r.stderr or r.stdout).strip().splitlines() or ['no output'])[-1]})")
+        print(f"claude-agenda: folder '{raw}' not found here; kept as a name for claude-open to resolve",
+              file=sys.stderr)
+        return raw
+    sys.exit(f"claude-agenda: folder not found: {raw} (use --dir . from inside the folder, or an absolute path)")
+
+
 def cmd_add(argv):
     argv = list(argv)
     prefix = take(argv, "--prefix")
@@ -658,9 +680,7 @@ def cmd_add(argv):
             sys.exit(f"claude-agenda: bad --day '{day}' (1-31)")
         day = int(day)
     date = parse_date(date, times) if date else None
-    folder = os.path.abspath(os.path.expanduser(folder))
-    if not os.path.isdir(folder):
-        sys.exit(f"claude-agenda: folder not found: {folder}")
+    folder = resolve_add_dir(folder)
     label = label_prefix(lp) + safe(argv[0])
     path = os.path.join(agents_dir(), label + ".plist")
     data = build_plist(label, prefix, prompt, folder, times, weekdays, day, date, rc_flag)
