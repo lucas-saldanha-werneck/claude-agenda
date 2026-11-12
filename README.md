@@ -32,9 +32,12 @@ Every Monday at 09:00 a session titled `REPORT DD-MM` opens in `~/code/my-app`. 
 `tmux attach -t claude-agenda-REPORT-<id>` (the id is in the log), or from the app with
 `--remote-control`.
 
-Before opening, a previous `REPORT` session is handled: idle → closed; still working → this run is
-skipped. When `claude agents --json` is not available, a previous session is closed only after
-`stale_hours` (default 12; see Settings). An idle session is closed by killing its tmux session only when
+Before opening, a previous `REPORT` session is handled: idle → closed; still working, running a shell,
+waiting for a permission or an answer, or of unknown status → this run is skipped (such a session in a
+tmux session claude-agenda opened is closed once it is older than `stale_hours`). When
+`claude agents --json` is not available, a previous session is closed only after `stale_hours` (default
+12; see Settings). A tmux session is closed only when every Claude session in it is idle. Two runs of the
+same prefix never overlap (a lock file in the log folder). An idle session is closed by killing its tmux session only when
 that tmux session is one claude-agenda opened (`claude-agenda-...` or the close-self allow-list below);
 in any other tmux session it is handled like an idle session outside tmux (`idle_outside_tmux`).
 
@@ -52,9 +55,13 @@ cd launchd-agenda
 ./install.sh --dry-run  # shows what it would do
 ```
 
-`install.sh` loads nothing unless you pass `--load`. Without `--prefix`, the launchd-overdue job reads
+`install.sh` loads nothing unless you pass `--load`. It exits with an error, without writing the launchd
+job, if a copy fails. Without `--prefix`, the launchd-overdue job reads
 its prefixes from the config file on each run; with `--prefix`, that prefix is written into the job. Jobs you create with `claude-agenda add` are
-loaded only with `--load` too.
+loaded only with `--load` too. `add` with the NAME of an existing job is refused unless you pass
+`--force` (the plist is then replaced in one step). `add` refuses to run from the plugin cache
+(`~/.claude/plugins/cache/...`): a job pointing there would break on the next plugin update, so run
+`install.sh` and use the installed `claude-agenda`.
 
 The plugin adds a skill so you can just ask Claude ("run /weekly-report every Monday at 9"):
 
@@ -170,6 +177,8 @@ apply.
 macOS only for scheduling (launchd). `claude-close-self` and `claude-agenda run` also work on Linux
 with tmux, but nothing schedules them there. Tests run on macOS, Linux and Windows (Git Bash) with
 fake `tmux`, `claude` and `launchctl`: `python3 tests/test_claude_agenda.py -v && bash tests/run.sh`.
+`bash tests/integration.sh` uses a real tmux (on its own tmux server, so your sessions are not touched);
+on a macOS CI runner (`CI=true`) it also loads and unloads real launchd jobs. CI runs it on macOS.
 
 Note on macOS privacy: a session started by launchd runs outside your terminal app, so folders
 protected by macOS (Desktop, Documents, cloud drives) may need Full Disk Access for the `claude`

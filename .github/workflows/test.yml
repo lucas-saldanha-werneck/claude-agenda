@@ -17,3 +17,16 @@ jobs:
           python-version: '3.12'
       - run: python tests/test_claude_agenda.py -v
       - run: bash tests/run.sh
+  integration:
+    # real tmux and real launchd (the fake-based suites above cannot see either)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: brew install tmux
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      - run: bash tests/integration.sh

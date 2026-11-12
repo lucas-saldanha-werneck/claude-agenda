@@ -574,6 +574,174 @@ class Overdue(Base):
         self.assertIn("org.other.past.plist", self.left())
 
 
+class AuditFixes2(Base):
+    """Regression tests for the second audit (finding ids in the test names' docstrings)."""
+
+    def config(self, **cfg):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(cfg, f)
+
+    def launcher(self, *extra):
+        return [PY, os.path.join(T, "fake_launcher.py"), *extra]
+
+    def kills(self):
+        return [c for c in self.calls("tmux") if c and c[0] == "kill-session"]
+
+    def new_sessions(self):
+        return [c for c in self.calls("tmux") if c and c[0] == "new-session"]
+
+    def test_waiting_or_shell_session_is_not_closed(self):
+        """LA-12: only "idle" is safe to close; waiting (permission/dialog) and shell follow stale_hours."""
+        for status in ("waiting", "shell", None, "something-new"):
+            for f in ("tmux-calls.jsonl",):
+                p = os.path.join(self.t, f)
+                if os.path.exists(p):
+                    os.remove(p)
+            self.tmux_state({"claude-agenda-R-1": int(time.time()) - 60}, {"4242": "claude-agenda-R-1"})
+            a = {"kind": "interactive", "name": "R 01-01", "pid": 4242}
+            if status:
+                a["status"] = status
+            r = self.agenda("run", "R", "hi", FAKE_AGENTS=json.dumps([a]))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.kills(), [], status)
+            self.assertEqual(self.new_sessions(), [], status)
+            self.assertIn("skipped", r.stdout, status)
+
+    def test_waiting_session_older_than_stale_hours_is_closed(self):
+        """LA-12: past stale_hours the stale rule applies."""
+        self.tmux_state({"claude-agenda-R-1": int(time.time()) - 13 * 3600}, {"4242": "claude-agenda-R-1"})
+        a = [{"kind": "interactive", "name": "R 01-01", "status": "waiting", "pid": 4242}]
+        r = self.agenda("run", "R", "hi", FAKE_AGENTS=json.dumps(a))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.kills(), [["kill-session", "-t", "claude-agenda-R-1"]])
+        self.assertEqual(len(self.new_sessions()), 1)
+
+    def test_waiting_session_outside_tmux_skips(self):
+        """LA-12: a waiting session outside tmux is never closed, even with idle_outside_tmux=close."""
+        closer = os.path.join(self.t, "closed.txt")
+        self.config(launch_command=self.launcher("{name}"), default_dir=self.work, idle_outside_tmux="close",
+                    close_command=[PY, "-c", "open(__import__('sys').argv[1], 'w')", closer])
+        self.tmux_state()
+        a = [{"kind": "interactive", "name": "R 01-01", "status": "waiting", "pid": 999999}]
+        r = self.agenda("R", "hi", FAKE_AGENTS=json.dumps(a))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(closer))
+        self.assertEqual(self.calls("launcher"), [])
+
+    def test_idle_agent_does_not_take_down_a_busy_one_in_the_same_session(self):
+        """LA-07: every agent is looked at before a tmux session is killed."""
+        self.tmux_state({"claude-agenda-R-1": int(time.time())}, {"4242": "claude-agenda-R-1", "4343": "claude-agenda-R-1"})
+        for other in ({"name": "R 02-01", "status": "busy"}, {"name": "OTHER 01-01", "status": "waiting"}):
+            agents = [{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 4242},
+                      dict(other, kind="interactive", pid=4343)]
+            r = self.agenda("run", "R", "hi", FAKE_AGENTS=json.dumps(agents))
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.kills(), [], other)
+            self.assertEqual(self.new_sessions(), [], other)
+
+    def test_failed_close_command_stops_the_run(self):
+        """LA-06: if closing the previous session fails, no new session is opened."""
+        self.tmux_state()
+        self.config(launch_command=self.launcher("{name}"), default_dir=self.work, idle_outside_tmux="close",
+                    close_command=[PY, "-c", "raise SystemExit(3)"])
+        idle = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 999999}])
+        r = self.agenda("R", "hi", FAKE_AGENTS=idle)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.calls("launcher"), [])
+        self.assertIn("close_command", r.stdout)
+
+    @unittest.skipIf(os.name == "nt", "flock is POSIX-only; Windows runs without the lock")
+    def test_concurrent_run_of_the_same_prefix_is_skipped(self):
+        """LA-08: one run per prefix at a time."""
+        import fcntl
+        self.tmux_state()
+        lockdir = os.path.join(self.t, "logs")
+        os.makedirs(lockdir, exist_ok=True)
+        with open(os.path.join(lockdir, "claude-agenda-R.lock"), "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            r = self.agenda("run", "R", "hi")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("another run", r.stdout)
+            self.assertEqual(self.new_sessions(), [])
+            r = self.agenda("run", "OTHER", "hi")   # another prefix is not blocked
+            self.assertEqual(len(self.new_sessions()), 1, r.stdout + r.stderr)
+
+    def test_prefix_that_starts_another_prefix_is_not_confused(self):
+        """LA-14: R must not treat the sessions of R-X (or "R X") as its own."""
+        self.tmux_state({"claude-agenda-R-X-1": int(time.time()) - 13 * 3600})
+        r = self.agenda("run", "R", "hi", FAKE_AGENTS_FAIL="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.kills(), [])
+        self.tmux_state({"claude-agenda-R-X-1": int(time.time())}, {"4242": "claude-agenda-R-X-1"})
+        busy = json.dumps([{"kind": "interactive", "name": "R X 01-01", "status": "busy", "pid": 4242}])
+        r = self.agenda("run", "R", "hi", FAKE_AGENTS=busy)
+        self.assertNotIn("still working", r.stdout)
+        self.assertEqual(len(self.new_sessions()), 2)
+
+    def test_remove_refuses_paths(self):
+        """LA-04: a NAME with / or .. never reaches outside LaunchAgents."""
+        os.makedirs(os.path.join(self.la, "com.claude-agenda.x"))
+        victim = os.path.join(self.la, "victim.plist")
+        with open(victim, "w") as f:
+            f.write("x")
+        for bad in ("com.claude-agenda.x/../victim", "com.claude-agenda.x/../../LaunchAgents/victim"):
+            r = self.agenda("remove", bad)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertTrue(os.path.exists(victim), bad)
+
+    def test_add_does_not_overwrite_without_force(self):
+        """LA-02: repeating a name needs --force; the plist is replaced atomically."""
+        args = ["add", "dup", "--prefix", "D", "--prompt", "first", "--at", "08:00", "--dir", self.work]
+        self.assertEqual(self.agenda(*args).returncode, 0)
+        r = self.agenda(*args[:4], "--prompt", "second", *args[6:])
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--force", r.stderr)
+        self.assertEqual(self.plist("com.claude-agenda.dup.plist")["ProgramArguments"][4], "first")
+        r = self.agenda(*args[:4], "--prompt", "second", *args[6:], "--force")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.plist("com.claude-agenda.dup.plist")["ProgramArguments"][4], "second")
+        self.assertEqual(sorted(os.listdir(self.la)), ["com.claude-agenda.dup.plist"])
+
+    def test_add_refuses_to_point_into_the_plugin_cache(self):
+        """LA-01: a plist must not point at the plugin cache, which the next plugin update deletes."""
+        import shutil
+        cache_bin = os.path.join(self.home, ".claude", "plugins", "cache", "x", "launchd-agenda", "0.0.0", "bin")
+        shutil.copytree(os.path.join(ROOT, "bin"), cache_bin)
+        r = subprocess.run([PY, os.path.join(cache_bin, "claude-agenda"), "add", "c", "--prefix", "C",
+                            "--prompt", "x", "--at", "08:00", "--dir", self.work],
+                           capture_output=True, text=True, env=self.env, cwd=self.work)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("install.sh", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.la, "com.claude-agenda.c.plist")))
+
+
+class OverdueAudit2(Overdue):
+    def test_failed_bootout_of_a_loaded_job_keeps_the_plist(self):
+        """LA-05: the plist is moved only when the job is really unloaded."""
+        r = self.run_overdue(FAKE_LAUNCHCTL_FAIL="bootout")   # bootout fails, print says it is still loaded
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("com.claude-agenda.past.plist", self.left())
+        self.assertIn("still loaded", r.stdout)
+        r = self.run_overdue(FAKE_LAUNCHCTL_FAIL="bootout,print")   # bootout fails because it was not loaded
+        self.assertNotIn("com.claude-agenda.past.plist", self.left())
+
+    def test_second_archive_with_the_same_name_keeps_the_first(self):
+        """LA-09: an archived plist is never overwritten."""
+        dest = os.path.join(self.la, "overdue")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "com.claude-agenda.past.plist"), "w") as f:
+            f.write("older")
+        self.run_overdue()
+        files = sorted(os.listdir(dest))
+        self.assertEqual(len(files), 2, files)
+        with open(os.path.join(dest, "com.claude-agenda.past.plist")) as f:
+            self.assertEqual(f.read(), "older")
+        self.assertTrue(any(f.startswith("com.claude-agenda.past.") and f.endswith(".plist") and f != "com.claude-agenda.past.plist"
+                            for f in files), files)
+
+
 STARTERS = {"config.json": "config.example.json", "close-self-allow": "close-self-allow.example"}
 SEED = os.path.join(ROOT, "bin", "claude_agenda_config.py")
 

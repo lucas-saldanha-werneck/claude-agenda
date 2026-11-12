@@ -4,14 +4,15 @@
 Usage:
   claude-agenda add NAME --prefix PREFIX --prompt TEXT --at HH:MM [--at HH:MM ...]
                 [--weekday DAY ...] [--day N] [--date [YYYY-]MM-DD] [--dir DIR]
-                [--remote-control] [--load] [--dry-run]
+                [--remote-control] [--load] [--force] [--dry-run]
   claude-agenda list
   claude-agenda remove NAME [--dry-run]
   claude-agenda run PREFIX PROMPT [--dir DIR] [--remote-control] [--dry-run]
   claude-agenda PREFIX PROMPT [...]      same as `run` (short form, for jobs written by hand)
 
 `add` writes a launchd job (~/Library/LaunchAgents/<label-prefix><NAME>.plist) that calls
-`claude-agenda run` at the given times. It loads the job only with --load.
+`claude-agenda run` at the given times. It loads the job only with --load, and replaces an existing job
+of the same NAME only with --force. It refuses to run from the plugin cache (use install.sh).
 `run` is what launchd calls: it opens an interactive Claude Code session named
 "PREFIX DD-MM" in a detached tmux session, with PROMPT as the first message.
 
@@ -20,7 +21,9 @@ launchd runs with no app open and, if the Mac was asleep at the scheduled time, 
 it wakes up (man launchd.plist).
 
 Before opening, a previous session of the same PREFIX is handled: idle -> closed;
-still working -> this run is skipped.
+busy, running a shell, waiting for permission or input, or of unknown status -> this run is skipped
+(a session of claude-agenda's own tmux older than stale_hours is closed). Two runs of one PREFIX
+never overlap (lock file in the log folder).
 
 --date makes a one-time job. launchd has no year, so the job would repeat every year on that day;
 `launchd-overdue` (installed next to this script) disables it once the date has passed.
@@ -206,14 +209,20 @@ def own_tmux_session(sess):
     return False
 
 
-def tmux_session_of(tm, pid):
-    """tmux session that holds process pid (walks up the process tree to the pane)."""
+def tmux_panes(tm):
+    """{pane_pid: session_name} on the current tmux server ({} if none)."""
     try:
         panes = subprocess.run(tm + ["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"],
                                capture_output=True, text=True, timeout=10).stdout.splitlines()
     except Exception:
+        return {}
+    return {l.split(" ", 1)[0]: l.split(" ", 1)[1] for l in panes if " " in l}
+
+
+def tmux_session_of(pane, pid):
+    """tmux session that holds process pid (walks up the process tree to a pane of `pane`)."""
+    if not pane or pid is None:
         return None
-    pane = {l.split(" ", 1)[0]: l.split(" ", 1)[1] for l in panes if " " in l}
     x = str(pid)
     for _ in range(12):
         if x in pane:
@@ -294,13 +303,37 @@ def close_idle(prefix, agent, close_cmd):
         try:
             r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
             log(f"{prefix}: close_command rc={r.returncode}")
+            return r.returncode == 0
         except (OSError, subprocess.TimeoutExpired) as e:
             log(f"{prefix}: close_command failed ({e})")
-        return
+            return False
     try:
         os.kill(int(pid), getattr(signal, "SIGTERM", 15))
+    except ProcessLookupError:
+        return True   # already gone
     except (OSError, TypeError, ValueError) as e:
         log(f"{prefix}: could not stop pid {pid} ({e})")
+        return False
+    return True
+
+
+def prefix_lock(prefix):
+    """Hold one run per prefix at a time. Returns the open lock file (keep it until the run ends), None when
+    locking is not available (no fcntl, e.g. Windows), or False when another run of the prefix holds it."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    try:
+        fh = open(os.path.join(log_dir(), f"claude-agenda-{safe(prefix)}.lock"), "a")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    return fh
 
 
 def run_launcher(prefix, cmd, folder, timeout=180):
@@ -377,21 +410,48 @@ def cmd_run(argv):
         return 1
     name = f"{prefix} {datetime.datetime.now():%d-%m}"
     mine = TMUX_PREFIX + safe(prefix) + "-"
+    own_session = re.compile(re.escape(mine) + r"\d+")          # names are {mine}{epoch}: R never takes R-X's
+    own_name = re.compile(re.escape(prefix) + r" \d{2}-\d{2}")   # "PREFIX DD-MM": R never takes "R X 01-01"
+    lock = prefix_lock(prefix)
+    if lock is False:
+        log(f"{prefix}: skipped - another run of {prefix} is in progress")
+        return 0
     sessions = tmux_sessions(tm) if tm else {}
-    handled = set()
+    try:
+        stale_h = float(setting("stale_hours", "CLAUDE_AGENDA_STALE_HOURS", 12))
+    except (TypeError, ValueError):
+        stale_h = 12.0
+    now = datetime.datetime.now().timestamp()
 
-    # 1) sessions Claude itself knows about (status idle/busy)
-    for a in agents():
-        if a.get("kind", "interactive") != "interactive" or not str(a.get("name", "")).startswith(prefix + " "):
-            continue
-        if a.get("status") == "busy":
-            log(f"{prefix}: skipped - '{a['name']}' is still working (pid {a.get('pid')})")
+    # 1) sessions Claude itself knows about. Everything is decided before anything is closed.
+    interactive = [a for a in agents() if a.get("kind", "interactive") == "interactive"]
+    ours = [a for a in interactive if own_name.fullmatch(str(a.get("name", "")))]
+    pane = tmux_panes(tm) if tm and ours else {}
+    kill = {}       # tmux session -> log line
+    close = []      # (agent, log line) closed with close_idle
+    for a in ours:
+        status, pid = a.get("status"), a.get("pid")
+        if status == "busy":
+            log(f"{prefix}: skipped - '{a['name']}' is still working (pid {pid})")
             return 0
-        sess = tmux_session_of(tm, a.get("pid")) if tm else None
+        sess = tmux_session_of(pane, pid)
+        if status != "idle":
+            # waiting (permission, dialog or input), shell, or unknown: not safe to close; stale-hours rule
+            what = f"'{a['name']}' is {status or 'of unknown status'} (pid {pid})"
+            created = sessions.get(sess) if sess and own_tmux_session(sess) else None
+            if created:
+                age_h = (now - created) / 3600
+                if age_h >= stale_h:
+                    kill[sess] = f"closing stale tmux session '{sess}' ({age_h:.1f} h old; {what})"
+                    continue
+                log(f"{prefix}: skipped - {what} in tmux '{sess}' ({age_h:.1f} h; closed after {stale_h:g} h)")
+                return 0
+            log(f"{prefix}: skipped - {what}; only an idle session is closed")
+            return 0
         if not sess or not own_tmux_session(sess):
             # never kill a tmux session claude-agenda did not open (the user may have resumed "PREFIX ..." there)
             where = f"'{a['name']}' is idle " + (f"in tmux session '{sess}', which claude-agenda did not open"
-                                                 if sess else "outside tmux") + f" (pid {a.get('pid')})"
+                                                 if sess else "outside tmux") + f" (pid {pid})"
             if idle_mode == "skip":
                 log(f"{prefix}: skipped - {where}; not closing it. Every run is skipped until it is closed: "
                     f"set idle_outside_tmux to \"open\" or \"close\" in the config to change this")
@@ -399,23 +459,34 @@ def cmd_run(argv):
             if idle_mode == "open":
                 log(f"{prefix}: {where}; opening a new session beside it (idle_outside_tmux=open)")
                 continue
-            log(f"{prefix}: closing {where} (idle_outside_tmux=close)")
-            if not dry:
-                close_idle(prefix, a, close_cmd)
+            close.append((a, f"closing {where} (idle_outside_tmux=close)"))
             continue
-        log(f"{prefix}: closing idle session '{a['name']}' (tmux {sess})")
-        handled.add(sess)
+        kill.setdefault(sess, f"closing idle session '{a['name']}' (tmux {sess})")
+    if kill:
+        # a tmux session is killed whole, so every other Claude in it must be idle too
+        for b in interactive:
+            if b in ours or b.get("status") == "idle":
+                continue
+            sess = tmux_session_of(pane or tmux_panes(tm), b.get("pid"))
+            if sess in kill:
+                log(f"{prefix}: skipped - tmux session '{sess}' also holds '{b.get('name')}', which is "
+                    f"{b.get('status') or 'of unknown status'} (pid {b.get('pid')}); not closing it")
+                return 0
+    for a, line in close:
+        log(f"{prefix}: {line}")
+        if not dry and not close_idle(prefix, a, close_cmd):
+            log(f"{prefix}: error - could not close '{a['name']}' (pid {a.get('pid')}); "
+                f"not opening a new session beside it")
+            return 1
+    for sess, line in kill.items():
+        log(f"{prefix}: {line}")
         if not dry:
             subprocess.run(tm + ["kill-session", "-t", sess], capture_output=True)
+    handled = set(kill)
 
     # 2) our tmux sessions with unknown status: close only when older than the stale limit
-    try:
-        stale_h = float(setting("stale_hours", "CLAUDE_AGENDA_STALE_HOURS", 12))
-    except (TypeError, ValueError):
-        stale_h = 12.0
-    now = datetime.datetime.now().timestamp()
     for sess, created in sessions.items():
-        if not sess.startswith(mine) or sess in handled:
+        if not own_session.fullmatch(sess) or sess in handled:
             continue
         age_h = (now - created) / 3600 if created else 0
         if age_h < stale_h:
@@ -502,6 +573,16 @@ def parse_date(s, times):
     return month, day, nxt
 
 
+def in_plugin_cache(path):
+    """True when path is inside Claude Code's plugin cache (~/.claude/plugins/cache, or under
+    $CLAUDE_CONFIG_DIR), which a plugin update replaces."""
+    p = path.replace("\\", "/")
+    roots = ["/.claude/plugins/cache/"]
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        roots.append(os.path.realpath(os.environ["CLAUDE_CONFIG_DIR"]).replace("\\", "/").rstrip("/") + "/plugins/cache/")
+    return any(r in p for r in roots)
+
+
 def build_plist(label, prefix, prompt, folder, times, weekdays, day, date, remote_control):
     me = os.path.abspath(sys.argv[0])
     args = [sys.executable, me, "run", prefix, prompt, "--dir", folder] + (["--remote-control"] if remote_control else [])
@@ -560,9 +641,16 @@ def cmd_add(argv):
     rc_flag = bool(take(argv, "--remote-control", has_value=False))
     load = bool(take(argv, "--load", has_value=False))
     dry = bool(take(argv, "--dry-run", has_value=False))
+    force = bool(take(argv, "--force", has_value=False))
     if len(argv) != 1 or not prefix or not prompt or not times:
         sys.exit("usage: claude-agenda add NAME --prefix PREFIX --prompt TEXT --at HH:MM "
-                 "[--weekday DAY] [--day N] [--date [YYYY-]MM-DD] [--dir DIR] [--remote-control] [--load] [--dry-run]")
+                 "[--weekday DAY] [--day N] [--date [YYYY-]MM-DD] [--dir DIR] [--remote-control] [--load] "
+                 "[--force] [--dry-run]")
+    me = os.path.realpath(sys.argv[0])
+    if in_plugin_cache(me):
+        sys.exit(f"claude-agenda: this copy runs from the plugin cache ({me}), which the next plugin update "
+                 f"deletes, so the job would break. Run install.sh from the plugin folder and use the "
+                 f"claude-agenda it installs (~/.local/bin/claude-agenda).")
     if date and (day or weekdays):
         sys.exit("claude-agenda: --date cannot be combined with --day or --weekday")
     if day is not None:
@@ -576,14 +664,24 @@ def cmd_add(argv):
     label = label_prefix(lp) + safe(argv[0])
     path = os.path.join(agents_dir(), label + ".plist")
     data = build_plist(label, prefix, prompt, folder, times, weekdays, day, date, rc_flag)
+    exists = os.path.lexists(path)
     if dry:
-        print(f"(dry-run) would write {path}:")
+        note = (" (it exists: replacing it needs --force)" if not force else " (replacing it)") if exists else ""
+        print(f"(dry-run) would write {path}{note}:")
         print(plistlib.dumps(data).decode())
         return 0
+    if exists and not force:
+        sys.exit(f"claude-agenda: {path} already exists. Use --force to replace it, or pick another NAME.")
     os.makedirs(agents_dir(), exist_ok=True)
-    with open(path, "wb") as f:
-        plistlib.dump(data, f)
-    print(f"wrote {path}")
+    tmp = f"{path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp, "wb") as f:
+            plistlib.dump(data, f)
+        os.replace(tmp, path)   # atomic: launchd or a crash never sees half a plist
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    print(f"{'replaced' if exists else 'wrote'} {path}")
     if date:
         print("one-time job: run `launchd-overdue` daily (install.sh sets that up) so it does not repeat next year")
     if not load:
@@ -642,6 +740,8 @@ def cmd_remove(argv):
     dry = bool(take(argv, "--dry-run", has_value=False))
     if len(argv) != 1:
         sys.exit("usage: claude-agenda remove NAME [--dry-run]")
+    if re.search(r"[/\\]|\.\.", argv[0]):
+        sys.exit(f"claude-agenda: bad job name {argv[0]!r} (no '/', '\\' or '..')")
     label = argv[0] if argv[0].startswith(label_prefix(lp)) else label_prefix(lp) + safe(argv[0])
     path = os.path.join(agents_dir(), label + ".plist")
     if not os.path.exists(path):

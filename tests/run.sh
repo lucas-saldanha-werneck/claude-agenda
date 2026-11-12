@@ -15,7 +15,9 @@ PY="$(command -v python3 || command -v python)"
 # fake tmux: prints $FAKE_TMUX_NAME for display-message and records every call
 mkdir -p "$W/fakebin"
 printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$FAKE_DIR/tmux-calls"' \
-  '[ "$1" = display-message ] && printf "%s\n" "$FAKE_TMUX_NAME"' 'exit 0' > "$W/fakebin/tmux"
+  '[ "$1" = display-message ] && printf "%s\n" "$FAKE_TMUX_NAME"' \
+  '[ "$1" = run-shell ] && printf "%s" "$3" > "$FAKE_DIR/run-shell-cmd"' \
+  '[ "$1" = kill-session ] && printf "%s" "$3" > "$FAKE_DIR/killed"' 'exit 0' > "$W/fakebin/tmux"
 printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$FAKE_DIR/launchctl-calls"' > "$W/fakebin/launchctl"
 chmod +x "$W/fakebin/tmux" "$W/fakebin/launchctl"
 export FAKE_DIR="$W" PATH="$W/fakebin:$PATH"
@@ -43,6 +45,13 @@ echo "$OUT" | grep -q "not closing it" && ok "allow-list file: other session lef
 printf '%s\n' '^custom-' > "$W/allow2"
 OUT=$(HOME="$AH" CLAUDE_CLOSE_SELF_ALLOW_FILE="$W/allow2" TMUX=/tmp/x FAKE_TMUX_NAME=custom-1 sh "$CS" 3)
 echo "$OUT" | grep -q "closes in 3s" && ok "CLAUDE_CLOSE_SELF_ALLOW_FILE" || bad "$OUT"
+# LA-03: a quote in the session name must not break out of the command tmux runs
+EVIL="claude-agenda-x'; touch '$W/pwned"
+rm -f "$W/run-shell-cmd" "$W/killed" "$W/pwned"
+OUT=$(TMUX=/tmp/x FAKE_TMUX_NAME="$EVIL" sh "$CS" 0)
+sh -c "$(cat "$W/run-shell-cmd")" 2>/dev/null
+[ ! -e "$W/pwned" ] && [ "$(cat "$W/killed" 2>/dev/null)" = "$EVIL" ] && ok "quote in session name stays one argument" \
+  || bad "pwned=$([ -e "$W/pwned" ] && echo yes) killed=$(cat "$W/killed" 2>/dev/null) cmd=$(cat "$W/run-shell-cmd")"
 
 echo "== install.sh"
 H="$W/home"; mkdir -p "$H"
@@ -78,6 +87,17 @@ OUT=$(HOME="$H" INSTALL_OS=Linux bash "$R/install.sh" --prefix org.other)
 echo "$OUT" | grep -q "macOS-only" && [ ! -f "$H/Library/LaunchAgents/org.other.launchd-overdue.plist" ] && ok "non-macOS: no plist" || bad "$OUT"
 OUT=$(HOME="$H" INSTALL_OS=Darwin bash "$R/install.sh" --uninstall --prefix org.example.agenda)
 [ ! -e "$H/.local/bin/claude-agenda" ] && [ ! -e "$H/.local/bin/claude-agenda.config.example.json" ] && [ ! -f "$P" ] && grep -q "^bootout gui/.*/org.example.agenda.launchd-overdue" "$W/launchctl-calls" && ok "--uninstall reverses it" || bad "$OUT"
+
+# LA-10: paths with XML characters are escaped in the plist
+H4="$W/home4"; mkdir -p "$H4"; B4="$W/bin&co"
+OUT=$(HOME="$H4" INSTALL_OS=Darwin INSTALL_BIN_DIR="$B4" bash "$R/install.sh" --prefix 'org.a&b')
+P4="$H4/Library/LaunchAgents/org.a&b.launchd-overdue.plist"
+[ -f "$P4" ] && "$PY" -c "import plistlib,sys;d=plistlib.load(open(sys.argv[1],'rb'));assert d['ProgramArguments'][1]==sys.argv[2]+'/launchd-overdue',d;assert d['Label']=='org.a&b.launchd-overdue',d" "$P4" "$B4" \
+  && ok "XML characters in paths escaped" || bad "$OUT / $(cat "$P4" 2>&1)"
+# LA-11: a copy that fails makes install.sh fail
+H5="$W/home5"; mkdir -p "$H5"; : > "$W/afile"
+OUT=$(HOME="$H5" INSTALL_OS=Darwin INSTALL_BIN_DIR="$W/afile/bin" bash "$R/install.sh" 2>&1); RC=$?
+[ $RC -ne 0 ] && [ ! -e "$H5/Library/LaunchAgents/com.claude-agenda.launchd-overdue.plist" ] && ok "failed copy: exit $RC, no job written" || bad "rc=$RC $OUT"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
