@@ -7,8 +7,9 @@ The problem: a plist whose StartCalendarInterval has Month and Day (launchd has 
 "every year on that day". After the job runs, it stays loaded and runs again next year.
 
 Rule: a plist in ~/Library/LaunchAgents whose label starts with one of the prefixes, where EVERY
-StartCalendarInterval entry has Month and Day, with no StartInterval, and whose date this year
-passed more than 1 day ago (launchd runs a missed job when the Mac wakes up, so by then it has run),
+StartCalendarInterval entry has Month and Day, with no StartInterval, and whose date passed more
+than 1 day ago (year: the ClaudeAgendaYear key written by `claude-agenda add`; a plist without it means
+the next such date after the plist was written) (launchd runs a missed job when the Mac wakes up, so by then it has run),
 is reported and turned off: `launchctl bootout` + plist moved to ~/Library/LaunchAgents/overdue/
 (kept; to turn it back on, move it back and `launchctl bootstrap`).
 
@@ -69,16 +70,27 @@ def launchctl():
     return [w] if w else None
 
 
-def due_date(d, today):
-    """Date of a one-time job this year, or None if the plist is not a one-time job."""
+def due_date(d, written):
+    """Date of a one-time job, or None if the plist is not a one-time job.
+
+    The year is the ClaudeAgendaYear key that `claude-agenda add` writes. Older plists have no year: the
+    date is then the next one after the plist was written (`written`, its mtime), which is the date the
+    add command promised ("the current year, or the next one if that date has passed")."""
     cal = d.get("StartCalendarInterval")
     cals = cal if isinstance(cal, list) else [cal] if isinstance(cal, dict) else []
     if not cals or d.get("StartInterval") or not all(isinstance(c, dict) and "Month" in c and "Day" in c for c in cals):
         return None
-    try:
-        return max(datetime.datetime(today.year, int(c["Month"]), int(c["Day"]), int(c.get("Hour", 0)), int(c.get("Minute", 0)))
+
+    def on(year):
+        return max(datetime.datetime(year, int(c["Month"]), int(c["Day"]), int(c.get("Hour", 0)), int(c.get("Minute", 0)))
                    for c in cals)
-    except (ValueError, TypeError):
+    try:
+        year = d.get("ClaudeAgendaYear")
+        if isinstance(year, int) and not isinstance(year, bool):
+            return on(year)
+        when = on(written.year)
+        return when if when >= written else on(written.year + 1)
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -125,11 +137,15 @@ def main():
         label = d.get("Label") or os.path.basename(f)[:-6]
         if label.endswith("launchd-overdue") or label in yearly:
             continue
-        when = due_date(d, t)
+        try:
+            written = datetime.datetime.fromtimestamp(os.path.getmtime(f))
+        except OSError:
+            written = t
+        when = due_date(d, written)
         if when is None or t - when < datetime.timedelta(days=1):
             continue   # not a one-time job, not yet due, or passed less than 1 day ago
         found += 1
-        log(f"{'(dry-run) ' if dry else ''}overdue {label}: date {when:%m-%d %H:%M} has passed")
+        log(f"{'(dry-run) ' if dry else ''}overdue {label}: date {when:%Y-%m-%d %H:%M} has passed")
         if dry:
             continue
         if lc:

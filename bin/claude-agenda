@@ -184,6 +184,28 @@ def tmux_sessions(tm):
     return out
 
 
+def own_tmux_session(sess):
+    """Same rule as claude-close-self: a tmux session claude-agenda may kill starts with "claude-agenda-"
+    or matches $CLAUDE_CLOSE_SELF_ALLOW or a line of the close-self allow-list (sessions your launch_command opens)."""
+    if sess.startswith(TMUX_PREFIX):
+        return True
+    pats = [os.environ.get("CLAUDE_CLOSE_SELF_ALLOW") or ""]
+    try:
+        with open(shared.close_self_allow_path(), encoding="utf-8") as f:
+            pats += [l.rstrip("\r\n") for l in f]
+    except OSError:
+        pass
+    for pat in pats:
+        if not pat or pat.startswith("#"):
+            continue
+        try:
+            if re.search(pat, sess):
+                return True
+        except re.error:
+            log(f"note: bad regex in the close-self allow-list, ignored: {pat!r}")
+    return False
+
+
 def tmux_session_of(tm, pid):
     """tmux session that holds process pid (walks up the process tree to the pane)."""
     try:
@@ -366,8 +388,10 @@ def cmd_run(argv):
             log(f"{prefix}: skipped - '{a['name']}' is still working (pid {a.get('pid')})")
             return 0
         sess = tmux_session_of(tm, a.get("pid")) if tm else None
-        if not sess:
-            where = f"'{a['name']}' is idle outside tmux (pid {a.get('pid')})"
+        if not sess or not own_tmux_session(sess):
+            # never kill a tmux session claude-agenda did not open (the user may have resumed "PREFIX ..." there)
+            where = f"'{a['name']}' is idle " + (f"in tmux session '{sess}', which claude-agenda did not open"
+                                                 if sess else "outside tmux") + f" (pid {a.get('pid')})"
             if idle_mode == "skip":
                 log(f"{prefix}: skipped - {where}; not closing it. Every run is skipped until it is closed: "
                     f"set idle_outside_tmux to \"open\" or \"close\" in the config to change this")
@@ -446,7 +470,15 @@ def parse_weekday(s):
     sys.exit(f"claude-agenda: bad --weekday '{s}' (mon..sun or 0-7)")
 
 
-def parse_date(s):
+def agenda_now():
+    v = os.environ.get("CLAUDE_AGENDA_NOW")   # tests: fixed "current" time, ISO format
+    return datetime.datetime.fromisoformat(v) if v else datetime.datetime.now()
+
+
+def parse_date(s, times):
+    """(month, day, year) of a one-time job. launchd has no year, so the job fires on the next MM-DD at the
+    last --at time: that is the year stored (ClaudeAgendaYear, read by launchd-overdue), and a YYYY that
+    names another year is refused."""
     m = re.fullmatch(r"(?:(\d{4})-)?(\d{1,2})-(\d{1,2})", s)
     if not m:
         sys.exit(f"claude-agenda: bad --date '{s}' (use YYYY-MM-DD or MM-DD)")
@@ -455,16 +487,26 @@ def parse_date(s):
         datetime.date(year or 2000, month, day)
     except ValueError:
         sys.exit(f"claude-agenda: bad --date '{s}'")
-    if year and year != datetime.date.today().year:
-        print(f"warning: launchd has no year; this job fires on {month:02d}-{day:02d} of the current year "
-              f"(or the next one if that date has passed)", file=sys.stderr)
-    return month, day
+    now = agenda_now()
+    h, mi = max(times)
+    nxt = now.year
+    try:
+        if datetime.datetime(nxt, month, day, h, mi) <= now:
+            nxt += 1
+        datetime.date(nxt, month, day)
+    except ValueError:
+        sys.exit(f"claude-agenda: --date '{s}': {month:02d}-{day:02d} does not exist in {nxt}")
+    if year is not None and year != nxt:
+        sys.exit(f"claude-agenda: --date '{s}': launchd has no year, so the job fires on the next "
+                 f"{month:02d}-{day:02d}, which is {nxt}-{month:02d}-{day:02d}. Pick a date within the next 12 months.")
+    return month, day, nxt
 
 
 def build_plist(label, prefix, prompt, folder, times, weekdays, day, date, remote_control):
     me = os.path.abspath(sys.argv[0])
     args = [sys.executable, me, "run", prefix, prompt, "--dir", folder] + (["--remote-control"] if remote_control else [])
     cals = []
+    extra = {"ClaudeAgendaYear": date[2]} if date else {}   # launchd ignores it; launchd-overdue reads it
     for h, m in times:
         base = {"Hour": h, "Minute": m}
         if date:
@@ -484,6 +526,7 @@ def build_plist(label, prefix, prompt, folder, times, weekdays, day, date, remot
         "EnvironmentVariables": {"PATH": f"{h}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
         "StandardOutPath": out,
         "StandardErrorPath": out,
+        **extra,
     }
 
 
@@ -526,7 +569,7 @@ def cmd_add(argv):
         if not day.isdigit() or not 1 <= int(day) <= 31:
             sys.exit(f"claude-agenda: bad --day '{day}' (1-31)")
         day = int(day)
-    date = parse_date(date) if date else None
+    date = parse_date(date, times) if date else None
     folder = os.path.abspath(os.path.expanduser(folder))
     if not os.path.isdir(folder):
         sys.exit(f"claude-agenda: folder not found: {folder}")
@@ -556,7 +599,7 @@ def cmd_add(argv):
     return r.returncode
 
 
-def describe(cal):
+def describe(cal, year=None):
     cals = cal if isinstance(cal, list) else [cal] if isinstance(cal, dict) else []
     names = {v: k for k, v in WEEKDAYS.items()}
     parts = []
@@ -565,7 +608,7 @@ def describe(cal):
         if "Weekday" in c:
             s = f"{names.get(c['Weekday'] % 7, c['Weekday'])} {s}"
         if "Month" in c:
-            s = f"{c['Month']:02d}-{c.get('Day', 1):02d} {s}"
+            s = f"{str(year) + '-' if year else ''}{c['Month']:02d}-{c.get('Day', 1):02d} {s}"
         elif "Day" in c:
             s = f"day {c['Day']} {s}"
         parts.append(s)
@@ -589,7 +632,7 @@ def cmd_list(argv):
             continue
         args = p.get("ProgramArguments", [])
         what = " ".join(args[args.index("run") + 1:args.index("run") + 3]) if "run" in args else " ".join(args[1:])
-        print(f"{p.get('Label', f[:-6])}  [{describe(p.get('StartCalendarInterval'))}]  {what}")
+        print(f"{p.get('Label', f[:-6])}  [{describe(p.get('StartCalendarInterval'), p.get('ClaudeAgendaYear'))}]  {what}")
     return 0
 
 

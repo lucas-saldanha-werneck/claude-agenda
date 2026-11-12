@@ -29,7 +29,7 @@ claude-agenda add NAME --prefix PREFIX --prompt "TEXT" --at HH:MM \
 - `--prompt`: the first message, often a slash command (`/weekly-report`). End it with
   "When done, run `claude-close-self`." so the session closes itself after the final answer.
 - `--dir`: the folder the session opens in (default: current folder).
-- `--date`: one-time job. launchd has no year; `launchd-overdue` turns it off after the date.
+- `--date`: one-time job, the next such date within 12 months (launchd has no year; a YYYY for a later year is refused). `launchd-overdue` turns it off after the date.
 - `--remote-control`: start the session with Remote Control, to follow it from the app or phone.
 - No `--weekday`/`--day`/`--date` = every day.
 

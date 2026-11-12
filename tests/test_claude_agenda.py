@@ -103,6 +103,26 @@ class Add(Base):
         self.assertEqual(self.plist("com.claude-agenda.once.plist")["StartCalendarInterval"],
                          {"Hour": 10, "Minute": 0, "Month": 12, "Day": 24})
 
+    def test_one_time_date_stores_the_intended_year(self):
+        now = dict(CLAUDE_AGENDA_NOW="2026-12-20T15:00:00")
+        r = self.agenda("add", "jan", "--prefix", "J", "--prompt", "x", "--at", "09:00", "--date", "01-05", **now)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.plist("com.claude-agenda.jan.plist")["ClaudeAgendaYear"], 2027)
+        r = self.agenda("add", "jan2", "--prefix", "J", "--prompt", "x", "--at", "09:00", "--date", "2027-01-05", **now)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.plist("com.claude-agenda.jan2.plist")["ClaudeAgendaYear"], 2027)
+        r = self.agenda("add", "xmas", "--prefix", "X", "--prompt", "x", "--at", "09:00", "--date", "12-24", **now)
+        self.assertEqual(self.plist("com.claude-agenda.xmas.plist")["ClaudeAgendaYear"], 2026)
+        self.assertIn("2027-01-05", self.agenda("list").stdout)
+
+    def test_one_time_date_outside_the_next_occurrence_is_rejected(self):
+        now = dict(CLAUDE_AGENDA_NOW="2026-12-20T15:00:00")
+        for bad in ("2028-01-05", "2026-01-05", "2026-12-20"):   # launchd would fire it on the wrong day
+            r = self.agenda("add", "b", "--prefix", "B", "--prompt", "x", "--at", "09:00", "--date", bad, **now)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("launchd has no year", r.stderr, bad)
+        self.assertFalse(os.path.exists(self.la))
+
     def test_bad_input_is_rejected(self):
         self.assertNotEqual(self.agenda("add", "x", "--prefix", "X", "--prompt", "y", "--at", "25:00").returncode, 0)
         self.assertNotEqual(self.agenda("add", "x", "--prefix", "X", "--prompt", "y").returncode, 0)
@@ -166,6 +186,28 @@ class Run(Base):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         kills = [c for c in self.calls("tmux") if c[0] == "kill-session"]
         self.assertEqual(kills, [["kill-session", "-t", "claude-agenda-R-1"]])
+        self.assertEqual(len(self.new_sessions()), 1)
+
+    def test_idle_session_in_a_foreign_tmux_session_is_not_killed(self):
+        # a resumed "R ..." session living in the user's own tmux session must never take that session down
+        self.tmux_state({"main": 1, "claude-agenda-R-1": int(time.time())}, {"4242": "main"})
+        agents = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 4242}])
+        r = self.agenda("run", "R", "hi", FAKE_AGENTS=agents)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(["kill-session", "-t", "main"], self.calls("tmux"))
+        self.assertIn("idle_outside_tmux", r.stdout)   # default "skip": treated like an idle session outside tmux
+        self.assertEqual(self.new_sessions(), [])
+
+    def test_idle_session_in_a_foreign_tmux_session_open_mode(self):
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump({"idle_outside_tmux": "open"}, f)
+        self.tmux_state({"main": 1}, {"4242": "main"})
+        agents = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 4242}])
+        r = self.agenda("run", "R", "hi", FAKE_AGENTS=agents)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c for c in self.calls("tmux") if c[0] == "kill-session"], [])
         self.assertEqual(len(self.new_sessions()), 1)
 
     def test_unknown_status_recent_skips_old_is_closed(self):
@@ -245,6 +287,8 @@ class Config(Base):
 
     def test_launch_command_still_closes_idle_and_respects_busy(self):
         self.config(launch_command=self.launcher("{name}"))
+        with open(os.path.join(self.home, ".config", "claude-agenda", "close-self-allow"), "w") as f:
+            f.write("# sessions my launcher opens\n^claude-x-\n")   # same allow-list as claude-close-self
         self.tmux_state({"claude-x-1": 1}, {"4242": "claude-x-1"})
         idle = json.dumps([{"kind": "interactive", "name": "R 01-01", "status": "idle", "pid": 4242}])
         self.agenda("R", "hi", FAKE_AGENTS=idle)
@@ -412,10 +456,12 @@ class ReviewFixes(Base):
 
 
 class Overdue(Base):
-    def write(self, label, cal, **extra):
+    def write(self, label, cal, written="2026-01-01T00:00:00", **extra):
         os.makedirs(self.la, exist_ok=True)
         with open(os.path.join(self.la, label + ".plist"), "wb") as f:
             plistlib.dump(dict(Label=label, ProgramArguments=["/bin/true"], StartCalendarInterval=cal, **extra), f)
+        t = datetime.datetime.fromisoformat(written).timestamp()
+        os.utime(os.path.join(self.la, label + ".plist"), (t, t))
 
     def run_overdue(self, *args, now="2026-11-08T12:00:00", **env):
         return subprocess.run([PY, OVERDUE, *args], capture_output=True, text=True,
@@ -452,6 +498,27 @@ class Overdue(Base):
             self.assertIn(f"com.claude-agenda.{kept}.plist", self.left(), kept)
         self.assertIn("org.other.past.plist", self.left())
         self.assertEqual(self.calls("launchctl"), [["bootout", f"gui/{getattr(os, 'getuid', lambda: 0)()}/com.claude-agenda.past"]])
+
+    def test_job_for_next_year_is_kept_until_its_date(self):
+        # made on 12-20 for 01-05: launchd has no year, so this year's 01-05 must not count
+        self.write("com.claude-agenda.jan", {"Month": 1, "Day": 5, "Hour": 9, "Minute": 0}, ClaudeAgendaYear=2027)
+        self.run_overdue(now="2026-12-21T08:00:00")
+        self.assertIn("com.claude-agenda.jan.plist", self.left())
+        self.run_overdue(now="2027-01-07T08:00:00")
+        self.assertNotIn("com.claude-agenda.jan.plist", self.left())
+
+    def test_stored_year_in_the_past_is_overdue(self):
+        self.write("com.claude-agenda.old", {"Month": 12, "Day": 24, "Hour": 9, "Minute": 0}, ClaudeAgendaYear=2025)
+        self.run_overdue()
+        self.assertNotIn("com.claude-agenda.old.plist", self.left())
+
+    def test_plist_without_year_uses_the_next_date_after_it_was_written(self):
+        # older plists have no ClaudeAgendaYear: the date the add command promised is the next one after the write
+        self.write("com.claude-agenda.legacy", {"Month": 1, "Day": 5, "Hour": 9, "Minute": 0}, written="2026-12-20T15:00:00")
+        self.run_overdue(now="2026-12-21T08:00:00")
+        self.assertIn("com.claude-agenda.legacy.plist", self.left())
+        self.run_overdue(now="2027-01-07T08:00:00")
+        self.assertNotIn("com.claude-agenda.legacy.plist", self.left())
 
     def test_custom_prefix(self):
         self.run_overdue("--prefix", "org.other.")
@@ -681,6 +748,8 @@ class Seed(Base):
         with open(os.path.join(self.la, "com.claude-agenda.old.plist"), "wb") as f:
             plistlib.dump(dict(Label="com.claude-agenda.old", ProgramArguments=["/bin/true"],
                                StartCalendarInterval={"Month": 1, "Day": 1, "Hour": 9, "Minute": 0}), f)
+        jan1 = datetime.datetime(2026, 1, 1).timestamp()   # a plist without a year means the next date after its write
+        os.utime(os.path.join(self.la, "com.claude-agenda.old.plist"), (jan1, jan1))
         seeded = os.path.join(self.t, "seeded", "config.json")
         self.tmux_state()
         outs = {}
