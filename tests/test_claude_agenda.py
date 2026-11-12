@@ -173,6 +173,7 @@ class AddDirName(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.plist("com.claude-agenda.t.plist")["ProgramArguments"][-1], os.path.join(self.work, "sub"))
 
+    @unittest.skipIf(os.name == "nt", "fake claude-open is a shebang script")
     def test_unknown_name_is_kept_when_claude_open_resolves_it(self):
         r = self.add("Pessoal/Saude")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -185,6 +186,7 @@ class AddDirName(Base):
         self.assertIn("Pessoal/Saude", r.stdout)
         self.assertNotIn("usage:", r.stdout + r.stderr)
 
+    @unittest.skipIf(os.name == "nt", "fake claude-open is a shebang script")
     def test_unresolvable_name_fails_with_a_hint(self):
         r = self.add("Nao/Existe")
         self.assertEqual(r.returncode, 1)
