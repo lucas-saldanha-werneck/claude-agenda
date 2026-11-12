@@ -133,7 +133,10 @@ handled by `idle_outside_tmux`: `skip` (default) logs on every run that it skipp
 the new session beside it; `close` runs `close_command` (or sends SIGTERM to its process) and then opens.
 
 With a launcher, `{dir}` is passed as written, without checking that the folder exists, so the launcher
-can resolve its own names. If the launcher uses `{dir}`, the job needs `--dir` or the config needs
+can resolve its own names. `add --dir NAME` follows the same rule: a path that exists is stored as an absolute
+path; a bare name that does not exist from where you run `add` is kept as written when the launcher is
+`claude-open` (which is asked to resolve it with `--dry-run`, opening nothing) or when the config has
+`"launch_resolves_dir": true`; otherwise `add` stops with "folder not found". If the launcher uses `{dir}`, the job needs `--dir` or the config needs
 `default_dir` (launchd starts jobs in `/`). The launcher runs without pipes, in its own process session,
 with its output appended to `claude-agenda-launch.log` in the log folder, so a launcher that leaves Claude
 running in the background returns at once; its exit code goes to `claude-agenda.log` (one still running

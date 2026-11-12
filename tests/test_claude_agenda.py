@@ -146,6 +146,74 @@ class Add(Base):
         self.assertEqual(self.calls("launchctl")[-1][0], "bootout")
 
 
+class AddDirName(Base):
+    """add --dir: an existing path is stored absolute; a bare name is kept for a name-resolving launcher."""
+    def setUp(self):
+        super().setUp()
+        self.bindir = os.path.join(self.t, "bin")
+        os.makedirs(self.bindir)
+        self.opener = os.path.join(self.bindir, "claude-open")
+        with open(self.opener, "w") as f:   # fake claude-open: resolves only "Pessoal/Saude"; logs every call
+            f.write(f"#!{PY}\nimport json, os, sys\n"
+                    "open(os.path.join(os.environ['FAKE_DIR'], 'opener-calls.jsonl'), 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                    "if '--dry-run' in sys.argv and sys.argv[1] != 'Pessoal/Saude':\n"
+                    "    sys.stderr.write(\"claude-open: nothing close to '\" + sys.argv[1] + \"'\\n\"); sys.exit(1)\n")
+        os.chmod(self.opener, 0o755)
+        d = os.path.join(self.home, ".config", "claude-agenda")
+        os.makedirs(d)
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump({"launch_command": [self.opener, "{dir}", "--tmux", "--name", "{name}", "--prompt", "{prompt}"]}, f)
+
+    def add(self, d, *extra):
+        return self.agenda("add", "t", "--prefix", "T", "--prompt", "x", "--at", "23:59", "--dir", d, *extra)
+
+    def test_existing_relative_path_is_stored_absolute(self):
+        os.makedirs(os.path.join(self.work, "sub"))
+        r = self.add("sub")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.plist("com.claude-agenda.t.plist")["ProgramArguments"][-1], os.path.join(self.work, "sub"))
+
+    @unittest.skipIf(os.name == "nt", "fake claude-open is a shebang script")
+    def test_unknown_name_is_kept_when_claude_open_resolves_it(self):
+        r = self.add("Pessoal/Saude")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("kept as a name for claude-open to resolve", r.stderr)
+        args = self.plist("com.claude-agenda.t.plist")["ProgramArguments"]
+        self.assertEqual(args[2:], ["run", "T", "x", "--dir", "Pessoal/Saude"])
+        # the stored arguments must be accepted by `run` (a stray argument made run fail on 12/11)
+        r = self.agenda(*args[2:], "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Pessoal/Saude", r.stdout)
+        self.assertNotIn("usage:", r.stdout + r.stderr)
+
+    @unittest.skipIf(os.name == "nt", "fake claude-open is a shebang script")
+    def test_unresolvable_name_fails_with_a_hint(self):
+        r = self.add("Nao/Existe")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("folder not found: Nao/Existe", r.stderr)
+        self.assertFalse(os.path.exists(self.la))
+
+    def test_without_a_name_resolving_launcher_the_error_has_a_hint(self):
+        os.remove(os.path.join(self.home, ".config", "claude-agenda", "config.json"))
+        r = self.add("Pessoal/Saude")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("use --dir . from inside the folder, or an absolute path", r.stderr)
+
+    def test_paths_starting_with_dot_or_slash_are_never_kept_as_names(self):
+        for d in ("./nope", "../nope", "/nope/x", "~/nope"):
+            r = self.add(d)
+            self.assertEqual(r.returncode, 1, d)
+            self.assertIn("folder not found", r.stderr, d)
+
+    def test_launch_resolves_dir_flag_keeps_the_name_without_asking(self):
+        with open(os.path.join(self.home, ".config", "claude-agenda", "config.json"), "w") as f:
+            json.dump({"launch_resolves_dir": True,
+                       "launch_command": [PY, os.path.join(T, "fake_launcher.py"), "{dir}"]}, f)
+        r = self.add("Any/Name")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.plist("com.claude-agenda.t.plist")["ProgramArguments"][-1], "Any/Name")
+
+
 class Run(Base):
     def new_sessions(self):
         return [c for c in self.calls("tmux") if c and c[0] == "new-session"]
