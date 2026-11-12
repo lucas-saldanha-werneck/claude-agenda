@@ -63,16 +63,21 @@ command -v tmux >/dev/null 2>&1 || echo "note: tmux not found - claude-agenda ru
 command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/libexec/claude-stable/claude" ] \
   || echo "note: claude not found on PATH - claude-agenda run needs Claude Code"
 
-run mkdir -p "$BIN"
-for t in $TOOLS; do
-  run cp "$R/bin/$t" "$BIN/$t" && run chmod 755 "$BIN/$t" && echo "installed $BIN/$t"
-done
-for t in $LIBS; do
-  run cp "$R/bin/$t" "$BIN/$t" && run chmod 644 "$BIN/$t" && echo "installed $BIN/$t"
-done
+ERRORS=0
+put() {   # put SRC DEST MODE: copy and set the mode, counting failures
+  if run cp "$1" "$2" && run chmod "$3" "$2"; then echo "installed $2"
+  else echo "install.sh: could not install $2" >&2; ERRORS=$((ERRORS+1)); fi
+}
+run mkdir -p "$BIN" || ERRORS=$((ERRORS+1))
+for t in $TOOLS; do put "$R/bin/$t" "$BIN/$t" 755; done
+for t in $LIBS; do put "$R/bin/$t" "$BIN/$t" 644; done
 for t in $STARTERS; do   # starter config files: the tools copy them to ~/.config on first run
-  run cp "$R/$t" "$BIN/claude-agenda.$t" && run chmod 644 "$BIN/claude-agenda.$t" && echo "installed $BIN/claude-agenda.$t"
+  put "$R/$t" "$BIN/claude-agenda.$t" 644
 done
+if [ $ERRORS -gt 0 ]; then
+  echo "install.sh: $ERRORS step(s) failed; the launchd job was not written" >&2
+  exit 1
+fi
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: $BIN is not on your PATH" ;; esac
 
 if [ $JOB = 0 ]; then exit 0; fi
@@ -82,20 +87,22 @@ if [ "$OS" != Darwin ]; then
 fi
 # --prefix goes into the job only when you gave one; otherwise launchd-overdue reads overdue_prefixes /
 # label_prefix from ~/.config/claude-agenda/config.json on every run.
+# XML-escape every value that goes into the plist (a path or prefix may hold & or <).
+x() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 PREFIX_ARGS=""
 [ $PREFIX_GIVEN = 1 ] && PREFIX_ARGS="
 		<string>--prefix</string>
-		<string>$PREFIX</string>"
+		<string>$(x "$PREFIX")</string>"
 XML="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
 	<key>Label</key>
-	<string>$LABEL</string>
+	<string>$(x "$LABEL")</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>$PY</string>
-		<string>$BIN/launchd-overdue</string>$PREFIX_ARGS
+		<string>$(x "$PY")</string>
+		<string>$(x "$BIN/launchd-overdue")</string>$PREFIX_ARGS
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>
@@ -107,16 +114,16 @@ XML="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>$LOGDIR/launchd-overdue.out</string>
+	<string>$(x "$LOGDIR/launchd-overdue.out")</string>
 	<key>StandardErrorPath</key>
-	<string>$LOGDIR/launchd-overdue.out</string>
+	<string>$(x "$LOGDIR/launchd-overdue.out")</string>
 </dict>
 </plist>"
 if [ $DRY = 1 ]; then
   echo "(dry-run) would write $PLIST:"; echo "$XML"
 else
-  mkdir -p "$LA" "$LOGDIR"
-  printf '%s\n' "$XML" > "$PLIST"
+  mkdir -p "$LA" "$LOGDIR" && printf '%s\n' "$XML" > "$PLIST" \
+    || { echo "install.sh: could not write $PLIST" >&2; exit 1; }
   echo "wrote $PLIST"
 fi
 if [ $LOAD = 1 ]; then

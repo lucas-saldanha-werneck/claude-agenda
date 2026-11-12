@@ -11,7 +11,9 @@ StartCalendarInterval entry has Month and Day, with no StartInterval, and whose 
 than 1 day ago (year: the ClaudeAgendaYear key written by `claude-agenda add`; a plist without it means
 the next such date after the plist was written) (launchd runs a missed job when the Mac wakes up, so by then it has run),
 is reported and turned off: `launchctl bootout` + plist moved to ~/Library/LaunchAgents/overdue/
-(kept; to turn it back on, move it back and `launchctl bootstrap`).
+(kept; to turn it back on, move it back and `launchctl bootstrap`). A job that stays loaded after the
+bootout keeps its plist in place (logged). If overdue/ already holds a plist with that name, the new one
+gets the date and time in its name.
 
 --dry-run   only report, change nothing
 --prefix    label prefix to check (repeatable). Default: $LAUNCHD_OVERDUE_PREFIX (comma-separated), else
@@ -149,11 +151,20 @@ def main():
         if dry:
             continue
         if lc:
-            subprocess.run(lc + ["bootout", f"gui/{uid}/{label}"], capture_output=True)
+            target = f"gui/{uid}/{label}"
+            r = subprocess.run(lc + ["bootout", target], capture_output=True, text=True)
+            # bootout also fails when the job was not loaded; only a job that `print` still finds is a problem
+            if r.returncode != 0 and subprocess.run(lc + ["print", target], capture_output=True).returncode == 0:
+                log(f"error: could not unload {label} (launchctl bootout rc={r.returncode}: "
+                    f"{(r.stderr or r.stdout).strip()}); it is still loaded, so its plist was left in place")
+                continue
         else:
             log("launchctl not found: plist moved, but not unloaded")
         os.makedirs(dest, exist_ok=True)
-        shutil.move(f, os.path.join(dest, os.path.basename(f)))
+        target_file = os.path.join(dest, os.path.basename(f))
+        if os.path.lexists(target_file):   # one archived before with the same name: keep both
+            target_file = os.path.join(dest, f"{os.path.basename(f)[:-6]}.{t:%Y%m%d-%H%M%S}.plist")
+        shutil.move(f, target_file)
     if not found:
         print(f"no overdue one-time jobs ({', '.join(prefixes)})")
     return 0

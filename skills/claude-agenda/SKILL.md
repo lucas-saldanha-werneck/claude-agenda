@@ -20,17 +20,20 @@ session) at the given times, with a prompt as the first message. macOS only.
 ```
 claude-agenda add NAME --prefix PREFIX --prompt "TEXT" --at HH:MM \
   [--weekday mon --weekday fri] [--day 15] [--date YYYY-MM-DD] \
-  [--dir /path/to/project] [--remote-control] [--load]
+  [--dir /path/to/project] [--remote-control] [--load] [--force]
 ```
 
 - `NAME`: short job id (letters, digits, dashes). The launchd label is `<label-prefix><NAME>`.
 - `PREFIX`: short upper-case tag for the session title (`PREFIX DD-MM`). A previous session with the
-  same prefix is closed if idle, and the run is skipped if it is still working.
+  same prefix is closed if idle, and the run is skipped if it is still working or waiting for a
+  permission or an answer.
 - `--prompt`: the first message, often a slash command (`/weekly-report`). End it with
   "When done, run `claude-close-self`." so the session closes itself after the final answer.
 - `--dir`: the folder the session opens in (default: current folder).
 - `--date`: one-time job, the next such date within 12 months (launchd has no year; a YYYY for a later year is refused). `launchd-overdue` turns it off after the date.
 - `--remote-control`: start the session with Remote Control, to follow it from the app or phone.
+- `--force`: replace an existing job with the same NAME (without it, `add` refuses). Use it only
+  when the user wants that job changed.
 - No `--weekday`/`--day`/`--date` = every day.
 
 Steps:

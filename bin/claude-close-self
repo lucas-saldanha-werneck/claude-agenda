@@ -37,5 +37,8 @@ if [ "$allowed" = no ]; then
 fi
 # The tmux server itself waits and kills (run-shell -b): a child of Claude's Bash tool dies when the
 # command returns, so `nohup ... &` would not survive.
-"$TM" run-shell -b "sleep $delay; '$TM' kill-session -t '$sess'"
+# The command goes through tmux format expansion and then sh -c: single-quote each value for sh (a ' becomes
+# '\'') and double every # so tmux leaves it alone.
+q() { printf "'%s'" "$(printf '%s' "$1" | sed -e "s/'/'\\\\''/g" -e 's/#/##/g')"; }
+"$TM" run-shell -b "sleep $delay; $(q "$TM") kill-session -t $(q "$sess")"
 echo "claude-close-self: '$sess' closes in ${delay}s"
