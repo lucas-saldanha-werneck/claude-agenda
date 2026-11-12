@@ -88,11 +88,11 @@ echo "$OUT" | grep -q "macOS-only" && [ ! -f "$H/Library/LaunchAgents/org.other.
 OUT=$(HOME="$H" INSTALL_OS=Darwin bash "$R/install.sh" --uninstall --prefix org.example.agenda)
 [ ! -e "$H/.local/bin/claude-agenda" ] && [ ! -e "$H/.local/bin/claude-agenda.config.example.json" ] && [ ! -f "$P" ] && grep -q "^bootout gui/.*/org.example.agenda.launchd-overdue" "$W/launchctl-calls" && ok "--uninstall reverses it" || bad "$OUT"
 
-# LA-10: paths with XML characters are escaped in the plist
+# LA-10: paths with XML characters are escaped in the plist (suffix compare: Git Bash rewrites /tmp in argv)
 H4="$W/home4"; mkdir -p "$H4"; B4="$W/bin&co"
 OUT=$(HOME="$H4" INSTALL_OS=Darwin INSTALL_BIN_DIR="$B4" bash "$R/install.sh" --prefix 'org.a&b')
 P4="$H4/Library/LaunchAgents/org.a&b.launchd-overdue.plist"
-[ -f "$P4" ] && "$PY" -c "import plistlib,sys;d=plistlib.load(open(sys.argv[1],'rb'));assert d['ProgramArguments'][1]==sys.argv[2]+'/launchd-overdue',d;assert d['Label']=='org.a&b.launchd-overdue',d" "$P4" "$B4" \
+[ -f "$P4" ] && "$PY" -c "import plistlib,sys;d=plistlib.load(open(sys.argv[1],'rb'));assert d['ProgramArguments'][1].endswith('/bin&co/launchd-overdue'),d;assert d['Label']=='org.a&b.launchd-overdue',d" "$P4" \
   && ok "XML characters in paths escaped" || bad "$OUT / $(cat "$P4" 2>&1)"
 # LA-11: a copy that fails makes install.sh fail
 H5="$W/home5"; mkdir -p "$H5"; : > "$W/afile"
