@@ -34,10 +34,13 @@ Every Monday at 09:00 a session titled `REPORT DD-MM` opens in `~/code/my-app`. 
 
 Before opening, a previous `REPORT` session is handled: idle → closed; still working → this run is
 skipped. When `claude agents --json` is not available, a previous session is closed only after
-`stale_hours` (default 12; see Settings).
+`stale_hours` (default 12; see Settings). An idle session is closed by killing its tmux session only when
+that tmux session is one claude-agenda opened (`claude-agenda-...` or the close-self allow-list below);
+in any other tmux session it is handled like an idle session outside tmux (`idle_outside_tmux`).
 
-One-time job: `--date 2026-12-24 --at 10:00`. `launchd-overdue` moves it to
-`~/Library/LaunchAgents/overdue/` the day after it ran.
+One-time job: `--date 2026-12-24 --at 10:00` (or `--date 12-24`: the next Dec 24). launchd has no year,
+so the date must be the next one within 12 months; the year is stored in the plist (`ClaudeAgendaYear`).
+`launchd-overdue` moves it to `~/Library/LaunchAgents/overdue/` the day after it ran.
 
 ## Install
 
