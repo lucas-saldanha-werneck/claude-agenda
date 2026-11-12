@@ -639,8 +639,11 @@ def resolve_add_dir(raw):
     resolves = bool(custom) and (os.path.basename(custom[0]) == "claude-open" or config().get("launch_resolves_dir") is True)
     if resolves and raw and not raw.startswith(("/", ".", "~")):
         if os.path.basename(custom[0]) == "claude-open":   # --dry-run resolves the name and opens nothing
-            r = subprocess.run([os.path.expanduser(custom[0]), raw, "--dry-run"], capture_output=True, text=True,
-                               stdin=subprocess.DEVNULL)
+            try:
+                r = subprocess.run([os.path.expanduser(custom[0]), raw, "--dry-run"], capture_output=True,
+                                   text=True, stdin=subprocess.DEVNULL, timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                sys.exit(f"claude-agenda: folder not found: {raw} (could not ask claude-open to resolve it: {e})")
             if r.returncode != 0:
                 sys.exit(f"claude-agenda: folder not found: {raw} (claude-open cannot resolve it either: "
                          f"{((r.stderr or r.stdout).strip().splitlines() or ['no output'])[-1]})")
