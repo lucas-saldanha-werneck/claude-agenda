@@ -1,14 +1,19 @@
 ---
-name: claude-agenda
-description: Schedule a Claude Code session to run on this Mac at a set time with launchd, locally, with the user's skills, hooks, MCP servers and files (unlike cloud routines). Use when the user says "schedule this", "run /some-skill every Monday at 9", "every night at 23:00 do X", "tomorrow at 8 run Y", "agenda", "agendar", "list my scheduled Claude jobs", "remove that schedule", or asks for a local cron for Claude.
+name: launchd-agenda
+description: Schedule a Claude Code session to run on this Mac at a set time with launchd, locally, with the user's skills, hooks, MCP servers and files, through the `claude-agenda` command. Use when the user says "schedule this", "run /some-skill every Monday at 9", "every night at 23:00 do X", "tomorrow at 8 run Y", "agenda", "agendar", "list the scheduled Claude jobs", "remove that schedule", or asks for a local cron for Claude. Not for cloud routines, which run on a remote machine.
+version: "0.3.0"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
+  tags: [macos, launchd, schedule, cron, tmux]
 ---
 
-# claude-agenda
+# launchd-agenda
 
-Schedules a launchd job that opens an interactive Claude Code session (in a detached tmux
-session) at the given times, with a prompt as the first message. macOS only.
+## Purpose
+
+Schedule a launchd job, through the `claude-agenda` command, that opens an interactive Claude Code session
+(in a detached tmux session) at the given times, with a prompt as the first message. macOS only.
+The command keeps its name; the skill is called `launchd-agenda`.
 
 ## Instructions
 
@@ -75,5 +80,23 @@ Logs: `~/Library/Logs/claude-agenda.log` (each run), `~/Library/Logs/claude-agen
   `claude-agenda add weekly-report --prefix REPORT --at 09:00 --weekday mon --dir ~/code/my-app --prompt "/weekly-report. When done, run claude-close-self." --load`
   (after a `--dry-run`); a session titled `REPORT DD-MM` opens every Monday at 09:00.
 - "Tomorrow at 8 run Y": a one-time job with `--date YYYY-MM-DD --at 08:00`; `launchd-overdue` turns it off after the date.
-- "List my scheduled Claude jobs": `claude-agenda list` prints each job with its times and prompt.
+- "List the scheduled Claude jobs": `claude-agenda list` prints each job with its times and prompt.
 - "Remove that schedule": `claude-agenda remove NAME` unloads and deletes the job.
+
+## Prerequisites
+
+- macOS (launchd), `python3` 3.8+, `tmux` and Claude Code (`claude`).
+- The `claude-agenda` command, installed by `install.sh` (not run from the plugin cache, whose path changes on every update).
+
+## Limitations
+
+- Scheduling is macOS only; on Linux nothing schedules the jobs.
+- launchd has no year: a `--date` job fires on the next such date within 12 months.
+- A run is skipped while the previous session with the same prefix is working or waiting for a permission or an answer.
+
+## Troubleshooting
+
+- A job did not run or failed: read `~/Library/Logs/claude-agenda.log` (each run, with the reason for a skip) and `~/Library/Logs/claude-agenda.out` (launchd output).
+- Check the job is loaded: `launchctl print gui/$(id -u)/<label>` (look for `state`).
+- `add` fails with "already exists": pass `--force` only when the user wants that job replaced.
+- Folders protected by macOS (Desktop, Documents, cloud drives) may need Full Disk Access for the `claude` binary, because launchd runs outside the terminal app.
