@@ -1,8 +1,22 @@
 # claude-agenda
 
+[![CI](https://github.com/lucas-saldanha-werneck/launchd-agenda/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/launchd-agenda/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/launchd-agenda)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.7-blue)](CHANGELOG.md)
+
 Schedule Claude Code sessions on your Mac with launchd. At the set time a real, interactive
 session opens in a detached tmux session, in the folder you chose, with your prompt as the first
 message. It runs locally, so it has your skills, hooks, MCP servers, files and keychain.
+
+[![launchd-agenda demo: tap to open the video](https://github.com/user-attachments/assets/97ee43b0-92dc-4894-9832-472e32246c95)](https://lucas-saldanha-werneck.github.io/launchd-agenda/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/af81518e-c263-4aaf-a25e-e408339d9cd0" alt="The scheduled job listed in the terminal" width="320"><br>The job shows in the list</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/c9afda02-a078-4797-b496-f03d2ed01086" alt="A real session started by launchd" width="320"><br>A real session starts by itself</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/3a070492-6bea-4be0-8206-b8734e6d4606" alt="Summary: say when, Claude shows up" width="320"><br>The idea in short</td>
+</tr>
+</table>
 
 Why not cloud routines or the app's scheduler: cloud routines run on a remote machine without your
 local skills and hooks, and an app scheduler only fires while the app is open. launchd runs with
@@ -195,6 +209,10 @@ binary itself.
 
 Removes the 3 tools and the launchd-overdue job. Jobs made with `claude-agenda add` stay; remove
 each with `claude-agenda remove NAME`.
+
+## Security
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 
