@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-13
+- Renamed the skill to `launchd-agenda` (the old name broke the skill schema). The `claude-agenda` command keeps its name.
+- Skill frontmatter has `version` and `tags`; the skill has Purpose, Prerequisites, Limitations and Troubleshooting sections; the description is in the third person.
+
 ## [0.2.7] - 2026-11-13
 - Skill author, Instructions and Examples sections.
 

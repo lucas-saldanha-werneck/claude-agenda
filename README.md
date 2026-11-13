@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/launchd-agenda/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/launchd-agenda/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/launchd-agenda)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.7-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue)](CHANGELOG.md)
+[![Skill score](https://img.shields.io/badge/skill%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 
 Schedule Claude Code sessions on your Mac with launchd. At the set time a real, interactive
 session opens in a detached tmux session, in the folder you chose, with your prompt as the first
@@ -84,7 +85,7 @@ The plugin adds a skill so you can just ask Claude ("run /weekly-report every Mo
 /plugin install launchd-agenda@lucas-tools
 ```
 
-The plugin is called `launchd-agenda` because Claude Code reserves plugin names that start with `claude-`. The skill uses the `claude-agenda` installed by `install.sh`, so run that too.
+The plugin and its skill are called `launchd-agenda` because Claude Code reserves names that contain `claude`. The skill uses the `claude-agenda` installed by `install.sh`, so run that too.
 
 Requires `python3` 3.8+, `tmux` and Claude Code (`claude`).
 
