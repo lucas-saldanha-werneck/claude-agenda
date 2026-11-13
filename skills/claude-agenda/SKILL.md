@@ -1,12 +1,22 @@
 ---
 name: claude-agenda
 description: Schedule a Claude Code session to run on this Mac at a set time with launchd, locally, with the user's skills, hooks, MCP servers and files (unlike cloud routines). Use when the user says "schedule this", "run /some-skill every Monday at 9", "every night at 23:00 do X", "tomorrow at 8 run Y", "agenda", "agendar", "list my scheduled Claude jobs", "remove that schedule", or asks for a local cron for Claude.
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # claude-agenda
 
 Schedules a launchd job that opens an interactive Claude Code session (in a detached tmux
 session) at the given times, with a prompt as the first message. macOS only.
+
+## Instructions
+
+1. Find the command (`command -v claude-agenda`); if it is missing, tell the user to run `./install.sh`.
+2. Read `~/.config/claude-agenda/config.json` if it exists (label prefix, default folder, launcher).
+3. Build the `claude-agenda add NAME --prefix PREFIX --prompt "TEXT" --at HH:MM ...` call and run it with `--dry-run`.
+4. Show the schedule in one line; add `--load` when the user already asked for it, otherwise ask first.
+5. Confirm with `claude-agenda list` and `launchctl print gui/$(id -u)/<label>`.
 
 ## Find the command
 
@@ -58,3 +68,12 @@ Read them before creating a job if they exist: the label prefix there is the one
 key. `claude-agenda PREFIX "PROMPT"` (no `run`) is accepted too, for jobs written by hand.
 
 Logs: `~/Library/Logs/claude-agenda.log` (each run), `~/Library/Logs/claude-agenda.out` (launchd output).
+
+## Examples
+
+- "Every Monday at 9 run /weekly-report in ~/code/my-app":
+  `claude-agenda add weekly-report --prefix REPORT --at 09:00 --weekday mon --dir ~/code/my-app --prompt "/weekly-report. When done, run claude-close-self." --load`
+  (after a `--dry-run`); a session titled `REPORT DD-MM` opens every Monday at 09:00.
+- "Tomorrow at 8 run Y": a one-time job with `--date YYYY-MM-DD --at 08:00`; `launchd-overdue` turns it off after the date.
+- "List my scheduled Claude jobs": `claude-agenda list` prints each job with its times and prompt.
+- "Remove that schedule": `claude-agenda remove NAME` unloads and deletes the job.
