@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/launchd-agenda)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.3.0-blue)](CHANGELOG.md)
 [![Skill score](https://img.shields.io/badge/skill%20score-98.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-93.8%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 Schedule Claude Code sessions on your Mac with launchd. At the set time a real, interactive
 session opens in a detached tmux session, in the folder you chose, with your prompt as the first
